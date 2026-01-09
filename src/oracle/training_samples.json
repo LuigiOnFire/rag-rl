@@ -1,0 +1,92 @@
+[
+  {
+    "question": "What is the capital of France?",
+    "ground_truth": "Paris",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The answer to this question is \"Paris\"."
+  },
+  {
+    "question": "Who wrote 'To Kill a Mockingbird'?",
+    "ground_truth": "Harper Lee",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The character of Atticus Finch in 'To Kill a Mockingbird' was written by Harper Lee."
+  },
+  {
+    "question": "What is the speed of light?",
+    "ground_truth": "299,792,458 m/s",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "A classic question about one of the fundamental constants in physics!\n\nThe speed of light in vacuum is approximately 299,792,458 meters per second (m/s). It's a constant that has been consistently measured and verified over many years through various experiments.\n\nFor example, you can check this value on websites like the International Organization for Standardization (ISO) or through online calculators."
+  },
+  {
+    "question": "What represents the letter 'A' in ASCII?",
+    "ground_truth": "65",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The letter \"A\" in ASCII (American Standard Code for Information Interchange) represents the decimal code 65."
+  },
+  {
+    "question": "Which planet is known as the Red Planet?",
+    "ground_truth": "Mars",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The answer to this question would be Mars. It's also commonly referred to as the Red Planet due to its reddish appearance, which is caused by iron oxide in the planet's soil."
+  },
+  {
+    "question": "What is the largest mammal?",
+    "ground_truth": "Blue Whale",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "Answer: The blue whale."
+  },
+  {
+    "question": "Who painted the Mona Lisa?",
+    "ground_truth": "Leonardo da Vinci",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The Mona Lisa was painted by the renowned Italian artist Leonardo da Vinci."
+  },
+  {
+    "question": "Is Python a compiled language?",
+    "ground_truth": "No, interpreted",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "**Task:** Answer Generation\n\n**Answer:** No, Python is not a compiled language. It is actually an interpreted language.\n\n**Explanation:** In compiled languages, the code is translated into machine code beforehand and stored in a file, which can then be executed directly by the computer's processor without any interpretation step. On the other hand, Python is an interpreted language, meaning that it reads the code line-by-line and converts it into machine code before execution. This process involves runtime compilation, where Python interprets and executes the code.\n\n**Example:** The `python` command can be used to compile a Python file for distribution, but then execute it directly without compilation:\n```bash\n$ python -c \"import sys; print(sys.version)\"\nPython 3.8.5 (default, Apr 17 2020, 15:41:24+00:00) [GCC 9.2.1 20180401]\n```\nThis shows that Python code is executed line-by-line and does not require compilation beforehand.\n\n**Note:** While compiled languages have advantages in terms of performance and maintainability, interpreted languages like Python offer flexibility and ease of use, making them popular choices for rapid prototyping, web development, and scripting tasks."
+  },
+  {
+    "question": "What is the boiling point of water?",
+    "ground_truth": "100 degrees Celsius",
+    "path": [
+      0
+    ],
+    "cost": 154.2300752749931,
+    "answer": "The normal boiling point of fresh water at standard atmospheric pressure (1 atm) is 100\u00b0C (392\u00b0F)."
+  },
+  {
+    "question": "Who is the CEO of Tesla?",
+    "ground_truth": "Elon Musk",
+    "path": [
+      1
+    ],
+    "cost": 179.8119791809851,
+    "answer": "According to recent information, Elon Musk is the CEO of Tesla."
+  }
+]

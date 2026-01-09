@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+build/
+dist/
+downloads/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code
+.vscode/
+
+# Project Specific
+# Generated artifacts (optional - keep if you want to track starter data, ignore if large)
+data/trajectories/
+data/meta/

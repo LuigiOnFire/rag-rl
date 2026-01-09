@@ -1,0 +1,8 @@
+codecarbon
+sentence-transformers
+rank_bm25
+numpy
+torch
+ollama
+scikit-learn
+tqdm
