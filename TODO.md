@@ -1,0 +1,3 @@
+- Carefully audit the structure of the state
+- Consider carefully our search method: prompting or tree search?
+- Judge seems broken. Take a look at it.

@@ -1,79 +1,92 @@
-from typing import List, Dict, Tuple
-import json
+import logging
+from typing import List, Dict, Generator, Any, Optional
+from datasets import load_dataset, Dataset
 
-# Ideally we load the actual HotpotQA dataset (e.g. from huggingface or json)
-# For this task, we will simulate a streamer with a small subset or dummy data
-# as we don't have internet access to download the full dataset.
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class HotpotQAStreamer:
-    def __init__(self, subset_size=10):
-        self.subset_size = subset_size
-        # Simulated Data found in prompt or similar
-        self.data = [
-            {
-                "question": "What is the capital of France?",
-                "answer": "Paris",
-                "supporting_facts": ["Paris is the capital and most populous city of France."],
-                "context": [
-                    ["Paris", "Paris is the capital and most populous city of France."],
-                    ["France", "France is a country located primarily in Western Europe."],
-                    ["Lyon", "Lyon is the third-largest city and second-largest urban area of France."],
-                    ["Marseille", "Marseille is the second-largest city of France."]
-                ]
-            },
-            {
-                "question": "Who wrote 'To Kill a Mockingbird'?",
-                "answer": "Harper Lee",
-                "supporting_facts": ["To Kill a Mockingbird is a novel by Harper Lee published in 1960."],
-                "context": [
-                    ["To Kill a Mockingbird", "To Kill a Mockingbird is a novel by Harper Lee published in 1960."],
-                    ["Harper Lee", "Nelle Harper Lee was an American novelist best known for her 1960 novel To Kill a Mockingbird."],
-                    ["Truman Capote", "Truman Capote was an American novelist, screenwriter, playwright, and actor."],
-                    ["Go Set a Watchman", "Go Set a Watchman is a novel by Harper Lee published on July 14, 2015."]
-                ]
-            },
-             {
-                "question": "Which planet is known as the Red Planet?",
-                "answer": "Mars",
-                "supporting_facts": ["Mars is often referred to as the 'Red Planet'."],
-                "context": [
-                    ["Mars", "Mars is the fourth planet from the Sun and the second-smallest planet in the Solar System."],
-                    ["Red Planet", "Mars is often referred to as the 'Red Planet' due to the effect of the iron oxide prevalent on Mars's surface."],
-                    ["Jupiter", "Jupiter is the fifth planet from the Sun and the largest in the Solar System."],
-                    ["Venus", "Venus is the second planet from the Sun."]
-                ]
-            },
-            {
-                "question": "What is the boiling point of water at sea level?",
-                "answer": "100 degrees Celsius",
-                "supporting_facts": ["The boiling point of water is 100 °C (212 °F) at standard pressure."],
-                "context": [
-                    ["Water", "Water is a chemical substance with the chemical formula H2O."],
-                    ["Boiling point", "The boiling point of a substance is the temperature at which the vapor pressure of a liquid equals the pressure surrounding the liquid."],
-                    ["Standard pressure", "Standard pressure is defined as 101.325 kPa."],
-                    ["Water properties", "The boiling point of water is 100 °C (212 °F) at standard pressure."]
-                ]
-            }
-        ]
-        
-    def stream(self) -> List[Dict]:
-        """Yields samples one by one."""
-        for sample in self.data:
-            yield sample
+    """
+    Streams the HotpotQA dataset (Distractor setting) for the GreenRAG Oracle.
+    """
+    def __init__(self, split: str = "train", limit: Optional[int] = None):
+        """
+        Args:
+            split: 'train', 'validation', or 'test'
+            limit: If set, only load the first N samples (useful for debugging)
+        """
+        self.split = split
+        self.limit = limit
+        self.dataset: Optional[Any] = None
+            
+        try:
+            # We use 'distractor' because it provides the Gold Paragraphs + Hard Negatives
+            # This is ideal for our "Ephemeral Index" strategy.
+            logger.info(f"Loading HotpotQA (distractor) split='{split}'...")
+            self.dataset = load_dataset("hotpot_qa", "distractor", split=split, trust_remote_code=True)
+            
+            if self.limit:
+                logger.info(f"Limiting dataset to first {self.limit} samples.")
+                self.dataset = self.dataset.select(range(self.limit))
+                
+        except Exception as e:
+            logger.error(f"Failed to load HotpotQA: {e}")
+            raise e
 
-    def get_corpus(self, sample) -> List[str]:
+    def stream(self) -> Generator[Dict[str, Any], None, None]:
         """
-        Extracts a flat list of document strings from the sample's context context.
-        HotpotQA context is [[title, [sentences]], ...]. 
-        Our prompt says 'context': [['Title', 'Sentence...'], ...]
-        We will flatten to strings like "Title: Sentence..."
+        Yields cleaned samples one by one.
         """
-        docs = []
-        for item in sample['context']:
-            title = item[0]
-            # Verify if item[1] is list or string (Hotpot vs our dummy)
-            content = item[1]
-            if isinstance(content, list):
-                content = " ".join(content)
-            docs.append(f"{title}: {content}")
-        return docs
+        if self.dataset is None:
+             raise ValueError("Dataset not initialized.")
+        for row in self.dataset:
+            yield self._process_row(row)
+
+    def _process_row(self, row: Any) -> Dict:
+        """
+        Converts HuggingFace format to GreenRAG format.
+        
+        HF 'context' is: {'title': ['T1', 'T2'], 'sentences': [['S1', 'S2'], ['S1']]}
+        We flatten this into a format ready for our Ephemeral Retriever.
+        """
+        processed = {
+            "id": row["id"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "gold_titles": [], # Store titles of supporting facts for Hindsight
+            "corpus": []       # The flat text for the Retriever
+        }
+
+        # 1. Parse Context (The Haystack)
+        # We flatten "Title" + "Sentences" into single strings for BM25/Dense indexing
+        titles = row["context"]["title"]
+        sentences_lists = row["context"]["sentences"]
+        
+        for title, sentences in zip(titles, sentences_lists):
+            # Join sentences into one block of text per document
+            full_text = f"{title}: {' '.join(sentences)}"
+            processed["corpus"].append(full_text)
+
+        # 2. Parse Supporting Facts (The Cheat Sheet for HER)
+        # row['supporting_facts'] is {'title': [], 'sent_id': []}
+        # We just need the titles to know which docs were the "Gold" ones.
+        # (We deduplicate because a doc might be cited multiple times)
+        processed["gold_titles"] = list(set(row["supporting_facts"]["title"]))
+
+        return processed
+
+# --- Verification Block ---
+if __name__ == "__main__":
+    print("Testing HotpotQA Streamer...")
+    
+    # Load just 3 samples to test
+    streamer = HotpotQAStreamer(split="train", limit=3)
+    
+    for i, sample in enumerate(streamer.stream()):
+        print(f"\n--- Sample {i+1} ---")
+        print(f"Q: {sample['question']}")
+        print(f"A: {sample['answer']}")
+        print(f"Corpus Size: {len(sample['corpus'])} docs")
+        print(f"First Doc: {sample['corpus'][0][:100]}...")
+        print(f"Gold Docs: {sample['gold_titles']}")

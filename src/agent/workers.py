@@ -1,5 +1,5 @@
 import ollama
-from typing import List, Any
+from typing import TypedDict, Any
 from src.env.state import GreenState
 
 # Models
@@ -23,73 +23,59 @@ class LLMWorker:
 slm_worker = LLMWorker(MODEL_SLM)
 llm_worker = LLMWorker(MODEL_LLM)
 
-def _format_history(state: GreenState) -> str:
-    hist_str = ""
-    for step in state.history:
-        # TODO: Lookup mnemonic from ID
-        hist_str += f"Action: {step['action_id']} | Arg: {step['argument']} | Obs: {step['observation']}\n"
-    return hist_str
+def _get_active_subquery(state: GreenState):
+    # Find last active or pending
+    for sub in reversed(state['subqueries']):
+        if sub['status'] in ["ACTIVE", "PENDING"]:
+            return sub
+    return state['subqueries'][0] # Fallback to main
 
-def generate_search_query(state: GreenState, history: str) -> str:
+def generate_search_query(state: GreenState) -> str:
     """
-    Method for RET (2,3).
-    Input Context: History + Previous Plan
-    Argument: Specific Search String
+    Focus on state['subqueries'][-1] (The active problem) or the specific active one.
     """
-    # Simple prompt
+    active_sub = _get_active_subquery(state)
+    target_q = active_sub['question']
+    
     prompt = f"""
-Current Question: {state.question}
-History:
-{history}
+Current Task: {target_q}
+Context from previous steps: {state['scratchpad']}
 
-Based on the history, generate a specific, focused search query to find the next necessary piece of information.
+Generate a specific search query to find information for this task.
 Output ONLY the search query.
 """
     return slm_worker.generate(prompt).strip().strip('"')
 
-def generate_plan(state: GreenState, history: str, use_llm: bool = False) -> str:
+def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     """
-    Method for DEC (7,8).
-    Input Context: History (Ambiguous Query)
-    Argument: List of Sub-questions
+    Decompose the active ambiguous query.
     """
+    active_sub = _get_active_subquery(state)
     worker = llm_worker if use_llm else slm_worker
     prompt = f"""
-The question "{state.question}" is complex.
-History:
-{history}
-
-Decompose the question into a step-by-step plan of simple sub-questions.
-Format: 1. [Sub-question] 2. [Sub-question] ...
+The question "{active_sub['question']}" is complex.
+Decompose it into a step-by-step plan of simple sub-questions.
+Format:
+1. ...
+2. ...
 """
     return worker.generate(prompt).strip()
 
-def generate_rewrite(state: GreenState, history: str) -> str:
-    """
-    Method for RWT (6).
-    Input Context: History + Previous Observation
-    Logic: Integrate Obs into Query.
-    """
+def generate_rewrite(state: GreenState) -> str:
+    # Not strictly used in new flow as described, but good to keep hook.
+    active_sub = _get_active_subquery(state)
     prompt = f"""
-Original Question: {state.question}
-History:
-{history}
-
-The previous search result needs to be integrated into the query to find the next step.
-Rewrite the query to be more specific based on the LAST observation.
+Refine this query: {active_sub['question']}
+Based on recent history: {state['recent_history'][-3:]}
 Output ONLY the rewritten query.
 """
-    return slm_worker.generate(prompt).strip().strip('"')
+    return slm_worker.generate(prompt).strip()
 
 def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> str:
-    """
-    Method for GRD (4,5).
-    Input Context: History + Last Retrieved Docs
-    Argument: "Relevant" / "Irrelevant"
-    """
+    active_sub = _get_active_subquery(state)
     worker = llm_worker if use_llm else slm_worker
     prompt = f"""
-Question: {state.question}
+Question: {active_sub['question']}
 Document: {doc_text}
 
 Is this document useful for answering the question?
@@ -98,19 +84,26 @@ Reply with EXACTLY one word: "Relevant" or "Irrelevant".
     result = worker.generate(prompt).strip().lower()
     return "Relevant" if "relevant" in result else "Irrelevant"
 
-def generate_answer(state: GreenState, history: str, use_llm: bool = False) -> str:
+def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     """
-    Method for GEN (0,1).
-    Input Context: Full History
-    Argument: Final Answer Text
+    Synthesize from state['subqueries'] (The gathered facts).
     """
+    active_sub = _get_active_subquery(state)
     worker = llm_worker if use_llm else slm_worker
+    
+    # Gather context from all gathered docs (or just relevant ones)
+    context_str = ""
+    for sub in state['subqueries']:
+        for doc in sub['documents']:
+            if doc['relevance'] == "RELEVANT" or doc['relevance'] == "UNKNOWN":
+                context_str += f"- {doc['content']}\n"
+    
     prompt = f"""
-Question: {state.question}
-Search History:
-{history}
+Question: {active_sub['question']}
+Gathered Facts:
+{context_str}
 
-Based on the gathered information, provide the final answer to the question.
+Provide the final answer to the question using the gathered facts.
 Output ONLY the answer.
 """
     return worker.generate(prompt).strip()

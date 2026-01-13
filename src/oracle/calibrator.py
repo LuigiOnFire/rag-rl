@@ -45,7 +45,7 @@ class EnergyCalibrator:
         elif action_id == actions.ACTION_GRD_SLM:
             return (state, self.dummy_context) 
         elif action_id == actions.ACTION_GRD_LLM:
-            return (state, self.dummy_context, True)
+            return (state, self.dummy_context)
         elif action_id in [actions.ACTION_RWT_SLM, actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
             return (state, history_str)
         return ()
