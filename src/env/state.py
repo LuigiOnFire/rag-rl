@@ -12,6 +12,13 @@ class SubQuery(TypedDict):
     answer: Optional[str]        # The extracted fact (e.g., "Shirley Temple")
     documents: List[Document]    # The raw search hits
 
+class GreenStep(TypedDict):
+    pre_state: 'GreenState'      # The context BEFORE the action
+    action_id: int
+    argument: str
+    observation: str
+    cost: float
+
 class GreenState(TypedDict):
     # 1. High Level
     main_query: str
@@ -25,9 +32,12 @@ class GreenState(TypedDict):
     # 3. The Plan
     subqueries: List[SubQuery]
 
-    # 4. Short-Term Memory (To prevent loops)
-    # Format: "ActionID: Argument -> Result Summary"
-    recent_history: List[str]
+    # 4. History (Full History of Actions Taken)
+    # For training and debugging purposes
+    history: List[GreenStep]
+    
+    # 5. Metadata
+    judge_log: Optional[str]
 
 def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
     return {
@@ -43,5 +53,6 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
             "answer": None,
             "documents": []
         }],
-        "recent_history": []
+        "history": [],
+        "judge_log": None
     }

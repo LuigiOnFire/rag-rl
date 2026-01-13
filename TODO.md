@@ -1,3 +1,2 @@
-- Carefully audit the structure of the state
-- Consider carefully our search method: prompting or tree search?
-- Judge seems broken. Take a look at it.
+- Currently we only return the final state. We need to see the full trajectory leading up to it for training.
+- The judge is much better, not passing trivial responses but is still far too permissive. We need to do something about that.

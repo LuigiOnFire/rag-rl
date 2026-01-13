@@ -2,6 +2,8 @@ import sys
 import os
 import json
 import time
+import logging
+from datetime import datetime
 
 # Add project root to sys.path
 sys.path.append(os.getcwd())
@@ -12,20 +14,28 @@ from src.oracle.search import OracleSearch
 from src.data.hotpot import HotpotQAStreamer
 
 def main():
+    # Initialize Logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.getLogger().setLevel(logging.INFO)
     print("Starting Oracle Generation...")
     
-    # 1. Initialize Streamer
-    streamer = HotpotQAStreamer()
+    # 0. Setup Directories
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = f"data/trajectories/run_{run_id}"
+    os.makedirs(run_dir, exist_ok=True)
+    gold_path = f"{run_dir}/gold_trajectories.jsonl"
+    print(f"Data will be saved to {run_dir}")
     
-    # 2. Results Container
-    trajectories = []
+    # 1. Initialize Streamer
+    streamer = HotpotQAStreamer(limit=10) # Start small
+    
+    # Open Gold File in append mode for continuous writing
+    f_gold = open(gold_path, "a")
     
     # 3. Process Stream
     count = 0
-    streamer = HotpotQAStreamer(limit=100) # Start small
     for sample in streamer.stream():
         # Setup Retriever
-        # ... run search ...    
         question = sample['question']
         ground_truth = sample['answer']
         
@@ -41,27 +51,50 @@ def main():
         # 6. Setup Oracle Search
         start_state = create_initial_state(question)
         start_state['ground_truth'] = ground_truth
-        solution_state = oracle_search.solve(start_state)
         
-        if solution_state:
-            print(f"  -> Solution found! Cost: {solution_state['total_joules']:.4f} J")
-            trajectories.append({
+        # Run Search
+        solution_state, debug_info = oracle_search.solve(start_state)
+        
+        # 7. Write Per-Question Debug Log
+        debug_path = f"{run_dir}/q_{count}.json"
+        with open(debug_path, "w") as f_debug:
+            json.dump({
                 "question": question,
                 "ground_truth": ground_truth,
-                "history": solution_state['recent_history']
-            })
+                "solution_found": solution_state is not None,
+                "debug_info": debug_info
+            }, f_debug, indent=2, default=str)
+
+        # 8. Write to Gold Trajectories (Continuous Saving)
+        if solution_state:
+            print(f"  -> Solution found! Cost: {solution_state['total_joules']:.4f} J")
+            
+            # Reformat history into structured steps for SFT
+            steps_out = []
+            for i, step in enumerate(solution_state['history']):
+                steps_out.append({
+                    "step_id": i,
+                    "pre_state": step['pre_state'],
+                    "action_id": step['action_id'],
+                    "argument": step['argument'],
+                    "observation": step['observation']
+                })
+                
+            record = {
+                "question": question,
+                "ground_truth": ground_truth,
+                "steps": steps_out,
+                "judge_log": solution_state.get('judge_log', 'Unknown')
+            }
+            f_gold.write(json.dumps(record) + "\n")
+            f_gold.flush() # Ensure it hits disk
         else:
             print(f"  -> No solution found.")
             
         count += 1
         
-    # 7. Save Results
-    output_path = "data/trajectories/gold_trajectories.jsonl"
-    with open(output_path, "w") as f:
-        for t in trajectories:
-            f.write(json.dumps(t) + "\n")
-            
-    print(f"\nGeneration complete. Saved {len(trajectories)} trajectories to {output_path}")
+    f_gold.close()
+    print(f"\nGeneration complete. Saved to {run_dir}")
 
 if __name__ == "__main__":
     main()

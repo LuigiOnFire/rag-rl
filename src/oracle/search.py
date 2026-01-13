@@ -1,9 +1,9 @@
 import heapq
 import json
 import copy
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict, Tuple
 from src.agent import actions, workers
-from src.env.state import GreenState, create_initial_state, SubQuery, Document
+from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenStep
 from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 
@@ -24,44 +24,70 @@ class OracleSearch:
         self.judge = SoftJudge()
 
     def get_valid_actions(self, state: GreenState) -> List[int]:
-        # Last action string parse "ActionID: ..."
-        # For naive loop prevention and basic grammar:
-        
-        # Always available for now in this search space
-        valid = [
-            actions.ACTION_RET_KEY, 
-            actions.ACTION_RET_VEC, 
-            actions.ACTION_DEC_SLM, 
-            # actions.ACTION_DEC_LLM, # Optional based on stack
-            actions.ACTION_GEN_SLM, 
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_GRD_SLM
-        ]
-        
-        # Constraints based on state?
-        # If no active subquery, maybe force GEN or DEC?
-        
-        return valid
+        # 1. Parse the last action from history to check context
+        last_action_id = None
+        if state['history']:
+            # New dict-based GreenStep
+            last_action_id = state['history'][-1]['action_id']
 
-    def solve(self, start_state_params: Any, max_depth=10) -> Optional[GreenState]:
-        # Handle start_state_params which might be the old object or just question string
-        # Assuming we pass a GreenState object or similar.
-        # But for robustness, let's look at how 02_generate calls it.
-        # It calls it with GreenState(question=..., ground_truth=...) (Old class style)
-        # We need to adapt.
-        
-        # Adaptation for 02_generate.py compatibility if it still passes the old class:
-        question = ""
-        ground_truth = ""
-        if hasattr(start_state_params, 'question'):
-            question = start_state_params.question
-            ground_truth = start_state_params.ground_truth
+        # 2. START OF TURN (Fixes "Phantom Grade")
+        if not state['history']:
+            return [
+                actions.ACTION_RET_KEY, 
+                actions.ACTION_RET_VEC, 
+                actions.ACTION_DEC_SLM,
+                actions.ACTION_GEN_SLM, 
+                actions.ACTION_GEN_LLM
+            ]
+
+        # 3. MIDDLE OF TURN
         else:
-            # Fallback if it's already a dict or something else
-             question = start_state_params.get('question', '') # If it was a dict
+            # Base actions always available
+            valid = [
+                actions.ACTION_RET_KEY, 
+                actions.ACTION_RET_VEC, 
+                actions.ACTION_DEC_SLM, 
+                actions.ACTION_GEN_SLM, 
+                actions.ACTION_GEN_LLM
+            ]
+            
+            # LOGIC FIX: Only allow GRADE if we just RETRIEVED
+            # otherwise, what are we grading?
+            retrieval_ids = [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]
+            
+            if last_action_id in retrieval_ids:
+                valid.append(actions.ACTION_GRD_SLM)
+                
+            # LOGIC FIX: Only allow REWRITE if we just GRADED
+            # (Optional, but saves energy)
+            if last_action_id == actions.ACTION_GRD_SLM:
+                valid.append(actions.ACTION_RWT_SLM)
+
+            return valid
+
+    def solve(self, start_state_params: Any, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
+        # Adaptation for 02_generate.py compatibility
+        initial_state: GreenState
         
-        initial_state = create_initial_state(question)
+        if isinstance(start_state_params, dict) and "main_query" in start_state_params:
+             # It is already a GreenState dict
+             # type ignore used because mypy/pylance struggles with deepcopy of TypedDict vs dict
+             initial_state = copy.deepcopy(start_state_params) # type: ignore
+        else:
+             # Legacy or plain object support
+             question = ""
+             ground_truth = ""
+             if hasattr(start_state_params, 'question'):
+                 question = getattr(start_state_params, 'question')
+                 ground_truth = getattr(start_state_params, 'ground_truth', "")
+             elif isinstance(start_state_params, dict):
+                 question = start_state_params.get('question', '')
+            
+             initial_state = create_initial_state(question, ground_truth)
         
+        # Ensure ground_truth variable is bound for the loop
+        ground_truth = initial_state['ground_truth']
+
         # Priority Queue: (TotalCost, tiebreaker, State)
         # State must be dict, so we can't heapify it directly unless wrapped.
         pq = [(0.0, 0, initial_state)] 
@@ -69,9 +95,24 @@ class OracleSearch:
         
         best_cost = float('inf')
         solution = None
+        
+        # Debug / Search Trace
+        search_trace = []
+        nodes_expanded = 0
 
         while pq:
             cost, _, current_state = heapq.heappop(pq)
+            nodes_expanded += 1
+            
+            # Log this step (snapshot summary)
+            step_info = {
+                "step_idx": nodes_expanded,
+                "cost": cost,
+                "history_len": len(current_state['history']),
+                "last_action": current_state['history'][-1]['action_id'] if current_state['history'] else "START",
+                "status": current_state.get('status', 'SOLVING')
+            }
+            search_trace.append(step_info)
             
             if cost >= best_cost:
                 continue
@@ -89,16 +130,22 @@ class OracleSearch:
                 final_sub = current_state['subqueries'][0]
                 final_answer = final_sub.get('answer') or ""
                 
-                if self.judge.judge(final_answer, ground_truth):
+                is_correct, reason = self.judge.judge(final_answer, ground_truth)
+                step_info["judge_verdict"] = is_correct
+                step_info["judge_reason"] = reason
+                
+                if is_correct:
                     if cost < best_cost:
                         best_cost = cost
                         solution = current_state
+                        solution['judge_log'] = reason
                     continue
                 else: 
                     # Wrong answer
                     continue
             
-            if len(current_state['recent_history']) >= max_depth:
+            if len(current_state['history']) >= max_depth:
+                step_info["drop_reason"] = "max_depth"
                 continue
 
             valid_actions = self.get_valid_actions(current_state)
@@ -200,7 +247,16 @@ class OracleSearch:
                     # Update Metadata
                     step_cost = get_cost(action_id)
                     new_state['total_joules'] += step_cost
-                    new_state['recent_history'].append(f"{action_id}: {argument} -> {observation}")
+                    
+                    # Capture GreenStep
+                    step_record: GreenStep = {
+                        "pre_state": copy.deepcopy(current_state),
+                        "action_id": action_id,
+                        "argument": argument,
+                        "observation": observation,
+                        "cost": step_cost
+                    }
+                    new_state['history'].append(step_record)
                     
                     tiebreaker += 1
                     heapq.heappush(pq, (cost + step_cost, tiebreaker, new_state))
@@ -209,4 +265,11 @@ class OracleSearch:
                     # print(f"Error expanding {action_id}: {e}")
                     continue
 
-        return solution
+        debug_info = {
+            "nodes_expanded": nodes_expanded,
+            "best_cost": best_cost if best_cost != float('inf') else None,
+            "solved": solution is not None,
+            "trace": search_trace
+        }
+        return solution, debug_info
+

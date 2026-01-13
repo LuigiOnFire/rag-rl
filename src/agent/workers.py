@@ -66,7 +66,7 @@ def generate_rewrite(state: GreenState) -> str:
     active_sub = _get_active_subquery(state)
     prompt = f"""
 Refine this query: {active_sub['question']}
-Based on recent history: {state['recent_history'][-3:]}
+Based on recent history: {state['history'][-3:]}
 Output ONLY the rewritten query.
 """
     return slm_worker.generate(prompt).strip()
