@@ -46,20 +46,46 @@ Output ONLY the search query.
 """
     return slm_worker.generate(prompt).strip().strip('"')
 
+def _format_history(history: list) -> str:
+    out = []
+    for h in history:
+        # Assuming h is GreenHistoryItem or similar dict
+        out.append(f"Action: {h.get('action_name', 'UNKNOWN')} -> Obs: {h.get('observation', '')}")
+    return "\n".join(out)
+
 def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     """
-    Decompose the active ambiguous query.
+    Generates a step-by-step plan.
+    If use_llm=True, uses the 8B model for complex reasoning.
     """
-    active_sub = _get_active_subquery(state)
+    # 1. Select the Brain
     worker = llm_worker if use_llm else slm_worker
+    
+    # 2. Contextual Prompt
+    # We need to see the main query and what we've already done.
+    history_str = _format_history(state['history'])
+    main_query = state['main_query']
+    
     prompt = f"""
-The question "{active_sub['question']}" is complex.
-Decompose it into a step-by-step plan of simple sub-questions.
-Format:
-1. ...
-2. ...
-"""
-    return worker.generate(prompt).strip()
+    Task: Break down the Main Question into 2-4 simple, independent sub-questions search queries.
+    Constraint: Return ONLY the numbered list. No intro, no filler.
+    
+    Main Question: "{main_query}"
+    
+    Context (What we've done so far):
+    {history_str}
+    
+    Plan:
+    """
+    
+    # 3. Generate
+    raw_plan = worker.generate(prompt)
+    
+    # 4. Cleaning (Crucial for weak models)
+    # Remove "Here is the plan:" prefixes
+    clean_plan = raw_plan.replace("Here is the plan:", "").strip()
+    
+    return clean_plan
 
 def generate_rewrite(state: GreenState) -> str:
     # Not strictly used in new flow as described, but good to keep hook.

@@ -210,9 +210,9 @@ class OracleSearch:
                                  if grade == "Relevant": count_rel += 1
                          observation = f"Graded docs. {count_rel} relevant."
                          
-                    elif action_id in [actions.ACTION_DEC_SLM]:
+                    elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
                         # Decompose active subquery
-                        plan_text = workers.generate_plan(new_state)
+                        plan_text = workers.generate_plan(new_state, use_llm=(action_id==actions.ACTION_DEC_LLM))
                         argument = plan_text
                         
                         # Parse plan (Naive splitting by newline or number)

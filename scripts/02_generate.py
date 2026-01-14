@@ -35,7 +35,7 @@ def main():
     
     # 3. Process Stream
     count = 0
-    streamer = HotpotQAStreamer(limit=10) # Start small
+    streamer = HotpotQAStreamer(limit=50) # Start small
     for sample in streamer.stream():
         # Setup Retriever
         # ... run search ...    

@@ -20,3 +20,4 @@ __pycache__/
 # Project Specific
 # Generated artifacts (optional - keep if you want to track starter data, ignore if large)
 data/
+models/
