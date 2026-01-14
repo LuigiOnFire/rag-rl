@@ -1,9 +1,9 @@
 import heapq
 import json
 import copy
-from typing import List, Optional, Any, Dict, Tuple
+from typing import List, Optional, Any, Dict, Tuple, TypedDict, NamedTuple
 from src.agent import actions, workers
-from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenStep
+from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenHistoryItem
 from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 
@@ -17,6 +17,12 @@ except FileNotFoundError:
 
 def get_cost(action_id):
     return float(COST_TABLE.get(str(action_id), 1.0))
+
+class SearchNode(NamedTuple):
+    state: GreenState
+    parent: Optional['SearchNode']
+    action_item: Optional[GreenHistoryItem]
+    # We store the parent link to reconstruct the full pre_state trajectory
 
 class OracleSearch:
     def __init__(self, retriever: EphemeralRetriever):
@@ -36,6 +42,7 @@ class OracleSearch:
                 actions.ACTION_RET_KEY, 
                 actions.ACTION_RET_VEC, 
                 actions.ACTION_DEC_SLM,
+                actions.ACTION_DEC_LLM,
                 actions.ACTION_GEN_SLM, 
                 actions.ACTION_GEN_LLM
             ]
@@ -46,7 +53,8 @@ class OracleSearch:
             valid = [
                 actions.ACTION_RET_KEY, 
                 actions.ACTION_RET_VEC, 
-                actions.ACTION_DEC_SLM, 
+                actions.ACTION_DEC_SLM,
+                actions.ACTION_DEC_LLM, 
                 actions.ACTION_GEN_SLM, 
                 actions.ACTION_GEN_LLM
             ]
@@ -88,20 +96,22 @@ class OracleSearch:
         # Ensure ground_truth variable is bound for the loop
         ground_truth = initial_state['ground_truth']
 
-        # Priority Queue: (TotalCost, tiebreaker, State)
-        # State must be dict, so we can't heapify it directly unless wrapped.
-        pq = [(0.0, 0, initial_state)] 
+        # Priority Queue: (TotalCost, tiebreaker, SearchNode)
+        # We wrap the state in a SearchNode to track the path (parent)
+        root_node = SearchNode(state=initial_state, parent=None, action_item=None)
+        pq = [(0.0, 0, root_node)] 
         tiebreaker = 0
         
         best_cost = float('inf')
-        solution = None
+        solution_node: Optional[SearchNode] = None
         
         # Debug / Search Trace
         search_trace = []
         nodes_expanded = 0
 
         while pq:
-            cost, _, current_state = heapq.heappop(pq)
+            cost, _, current_node = heapq.heappop(pq)
+            current_state = current_node.state
             nodes_expanded += 1
             
             # Log this step (snapshot summary)
@@ -120,13 +130,6 @@ class OracleSearch:
             # Check Success
             if current_state['status'] == "SOLVED":
                 # We generated a "SOLVED" state.
-                # Now we need to verify if the answer is actually correct relative to ground_truth.
-                # The "Answer" is in the last subquery answer or implicitly the resolution.
-                # In this schema, GEN updates a subquery answer.
-                # If the main query is Answered, done.
-                
-                # Where is the final answer stored? 
-                # If main query subquery is answered, that's the result.
                 final_sub = current_state['subqueries'][0]
                 final_answer = final_sub.get('answer') or ""
                 
@@ -137,8 +140,9 @@ class OracleSearch:
                 if is_correct:
                     if cost < best_cost:
                         best_cost = cost
-                        solution = current_state
-                        solution['judge_log'] = reason
+                        solution_node = current_node
+                        # Update the state in the node with judge log
+                        solution_node.state['judge_log'] = reason
                     continue
                 else: 
                     # Wrong answer
@@ -248,28 +252,74 @@ class OracleSearch:
                     step_cost = get_cost(action_id)
                     new_state['total_joules'] += step_cost
                     
-                    # Capture GreenStep
-                    step_record: GreenStep = {
-                        "pre_state": copy.deepcopy(current_state),
+                    # Create Lightweight History Item
+                    history_item: GreenHistoryItem = {
                         "action_id": action_id,
+                        "action_name": actions.get_action_name(action_id),
                         "argument": argument,
                         "observation": observation,
                         "cost": step_cost
                     }
-                    new_state['history'].append(step_record)
+                    new_state['history'].append(history_item)
+                    
+                    # Create New Node
+                    new_node = SearchNode(state=new_state, parent=current_node, action_item=history_item)
                     
                     tiebreaker += 1
-                    heapq.heappush(pq, (cost + step_cost, tiebreaker, new_state))
+                    heapq.heappush(pq, (cost + step_cost, tiebreaker, new_node))
                     
                 except Exception as e:
                     # print(f"Error expanding {action_id}: {e}")
                     continue
 
+        # Reconstruct Trajectory from Solution Node
+        sft_trajectory = []
+        final_state = None
+        
+        if solution_node:
+            final_state = solution_node.state
+            
+            # Backtrack
+            curr = solution_node
+            path_nodes = []
+            while curr:
+                path_nodes.append(curr)
+                curr = curr.parent
+            
+            # Reverse to get chronological order (Start -> End)
+            path_nodes.reverse()
+            
+            # Now build SFT steps: (Pre-State from parent) -> Action
+            # path_nodes[0] is Root (Start State, no action leading to it)
+            # path_nodes[1] is State 1 (created by Action 1 from State 0)
+            
+            for i in range(1, len(path_nodes)):
+                node = path_nodes[i]
+                parent = path_nodes[i-1]
+                
+                # The action that took us from Parent -> Node
+                act = node.action_item 
+                # The state input was the Parent's state
+                # Create a copy and remove ground_truth to prevent data leakage in training
+                pre_state = copy.copy(parent.state)
+                if 'ground_truth' in pre_state:
+                    del pre_state['ground_truth']
+                
+                if act:
+                    sft_trajectory.append({
+                        "step_id": i-1,
+                        "pre_state": pre_state, # Saved snapshot
+                        "action_id": act['action_id'],
+                        "argument": act['argument'],
+                        "observation": act['observation']
+                    })
+
         debug_info = {
             "nodes_expanded": nodes_expanded,
             "best_cost": best_cost if best_cost != float('inf') else None,
-            "solved": solution is not None,
-            "trace": search_trace
+            "solved": solution_node is not None,
+            "trace": search_trace,
+            "sft_trajectory": sft_trajectory
         }
-        return solution, debug_info
+        return final_state, debug_info
 

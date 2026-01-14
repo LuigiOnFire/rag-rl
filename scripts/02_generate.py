@@ -3,7 +3,6 @@ import os
 import json
 import time
 import logging
-from datetime import datetime
 
 # Add project root to sys.path
 sys.path.append(os.getcwd())
@@ -18,24 +17,28 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logging.getLogger().setLevel(logging.INFO)
     print("Starting Oracle Generation...")
-    
-    # 0. Setup Directories
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = f"data/trajectories/run_{run_id}"
+
+    # Create Run Directory
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = f"data/runs/run_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
+    print(f"Run Directory: {run_dir}")
+    
+    # Gold Output File
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
-    print(f"Data will be saved to {run_dir}")
     
     # 1. Initialize Streamer
-    streamer = HotpotQAStreamer(limit=10) # Start small
+    streamer = HotpotQAStreamer()
     
-    # Open Gold File in append mode for continuous writing
-    f_gold = open(gold_path, "a")
+    # 2. Results Container
+    # trajectories = [] # Removed in favor of continuous file writing
     
     # 3. Process Stream
     count = 0
+    streamer = HotpotQAStreamer(limit=10) # Start small
     for sample in streamer.stream():
         # Setup Retriever
+        # ... run search ...    
         question = sample['question']
         ground_truth = sample['answer']
         
@@ -69,32 +72,24 @@ def main():
         if solution_state:
             print(f"  -> Solution found! Cost: {solution_state['total_joules']:.4f} J")
             
-            # Reformat history into structured steps for SFT
-            steps_out = []
-            for i, step in enumerate(solution_state['history']):
-                steps_out.append({
-                    "step_id": i,
-                    "pre_state": step['pre_state'],
-                    "action_id": step['action_id'],
-                    "argument": step['argument'],
-                    "observation": step['observation']
-                })
-                
+            # Retrieve reconstructed SFT trajectory from debug_info
+            steps_out = debug_info.get("sft_trajectory", [])
+            
             record = {
                 "question": question,
                 "ground_truth": ground_truth,
                 "steps": steps_out,
                 "judge_log": solution_state.get('judge_log', 'Unknown')
             }
-            f_gold.write(json.dumps(record) + "\n")
-            f_gold.flush() # Ensure it hits disk
+            
+            with open(gold_path, "a") as f_gold:
+                f_gold.write(json.dumps(record) + "\n")
         else:
             print(f"  -> No solution found.")
             
         count += 1
         
-    f_gold.close()
-    print(f"\nGeneration complete. Saved to {run_dir}")
+    print(f"\nGeneration complete. Saved results to {gold_path}")
 
 if __name__ == "__main__":
     main()

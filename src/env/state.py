@@ -1,4 +1,4 @@
-from typing import List, Literal, TypedDict, Optional
+from typing import List, Literal, TypedDict, Optional, Any
 
 class Document(TypedDict):
     title: str
@@ -12,11 +12,12 @@ class SubQuery(TypedDict):
     answer: Optional[str]        # The extracted fact (e.g., "Shirley Temple")
     documents: List[Document]    # The raw search hits
 
-class GreenStep(TypedDict):
-    pre_state: 'GreenState'      # The context BEFORE the action
+class GreenHistoryItem(TypedDict):
+    """Lightweight history item (No pre_state recursion)."""
     action_id: int
-    argument: str
-    observation: str
+    action_name: str    # "RET_KEY"
+    argument: str       # "What is the capital?"
+    observation: str    # "Found 3 docs..."
     cost: float
 
 class GreenState(TypedDict):
@@ -32,9 +33,9 @@ class GreenState(TypedDict):
     # 3. The Plan
     subqueries: List[SubQuery]
 
-    # 4. History (Full History of Actions Taken)
-    # For training and debugging purposes
-    history: List[GreenStep]
+    # 4. History (Full History of Actions Taken for SFT)
+    # Changed to Lightweight Items to prevent recursion bloat
+    history: List[GreenHistoryItem]
     
     # 5. Metadata
     judge_log: Optional[str]

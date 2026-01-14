@@ -1,2 +1,9 @@
-- Currently we only return the final state. We need to see the full trajectory leading up to it for training.
-- The judge is much better, not passing trivial responses but is still far too permissive. We need to do something about that.
+Phase 1:
+- Decompose doesn't work right, let's fix it and add DEC_LLM too
+- Move from the priority queue-tree search to a prompting/distillation from Llama
+
+Phase 2:
+- Set up training pipeline for supervised reinforcment learning
+
+Phase 3:
+- Set up training pipeline
