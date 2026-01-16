@@ -22,7 +22,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 # But environment likely doesn't have access. I will use the path from workers.py or standard HF text.
 # For this script, let's allow an env var or default to a known accessible model.
 # I will use the one requested but be ready to fallback.
-TARGET_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+TARGET_MODEL = "meta-llama/Llama-3.2-1B-Instruct" 
 
 OUTPUT_DIR = "models/green-rag-sft-v1"
 RUN_LOGS_DIR = "data/runs"
@@ -98,9 +98,9 @@ def main():
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
         logging_steps=10,
-        num_train_epochs=3,
+        num_train_epochs=15,
         max_grad_norm=0.3,
-        warmup_ratio=0.03,
+        warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         fp16=not use_bf16,
         bf16=use_bf16,

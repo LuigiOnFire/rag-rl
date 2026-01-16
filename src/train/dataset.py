@@ -1,7 +1,11 @@
 from typing import Any, Dict, List
 import json
+import logging
 from datasets import Dataset 
 from src.agent import actions
+from src.agent.prompts import format_state_for_prompt
+
+logger = logging.getLogger(__name__)
 
 def create_green_dataset(jsonl_paths: List[str], tokenizer: Any) -> Dataset:
     """
@@ -39,56 +43,25 @@ def create_green_dataset(jsonl_paths: List[str], tokenizer: Any) -> Dataset:
                 except json.JSONDecodeError:
                     continue
                     
-    print(f"Loaded {len(samples)} training samples from {len(jsonl_paths)} files.")
+    logger.info(f"Loaded {len(samples)} training samples from {len(jsonl_paths)} files.")
     
     if not samples:
          # Fallback for empty runs to prevent crash
-        print("Warning: No samples found. Creating dummy dataset.")
+        logger.warning("No samples found. Creating dummy dataset.")
         return Dataset.from_list([{"text": "Empty"}])
+
+    # Logs the very first sample so you can verify the Prompt/Completion format visually.
+    logger.info(f"\n{'='*40}\nSAMPLE TRAINING DATA (Item 0):\n{'='*40}\n{samples[0]['text']}\n{'='*40}\n")
     
     # Return standard HF Dataset
     return Dataset.from_list(samples)
 
 def format_prompt(state: Dict[str, Any]) -> str:
-    """
-    Convert State Dict to a readable text representation.
-    """
-    # 1. Header
-    out = f"Goal: {state.get('main_query', 'Unknown')}\n"
-    out += f"Status: {state.get('status', 'SOLVING')}\n"
-    out += f"Scratchpad: {state.get('scratchpad', '')}\n\n"
-    
-    # 2. History
-    out += "History:\n"
-    history = state.get('history', [])
-    if not history:
-        out += "(None)\n"
-    else:
-        for i, item in enumerate(history):
-            # Handle lightweight history items
-            act = item.get('action_name', 'UNKNOWN')
-            obs = item.get('observation', '')
-            out += f"{i+1}. {act} -> {obs}\n"
-    
-    # 3. Subqueries
-    out += "\nSub-Tasks:\n"
-    subs = state.get('subqueries', [])
-    for sub in subs:
-        status = sub.get('status', 'PENDING')
-        q = sub.get('question', '')
-        ans = sub.get('answer')
-        docs = len(sub.get('documents', []))
-        
-        line = f"[{status}] {q}"
-        if ans:
-            line += f" (Ans: {ans})"
-        if docs > 0:
-            line += f" [Docs: {docs}]"
-        out += line + "\n"
-        
-    out += "\nTask: Select the next best Action and Argument.\nAnswer:"
-    return out
+    return format_state_for_prompt(state)
 
 def format_completion(action_id: int, argument: str) -> str:
-    action_name = actions.get_action_name(action_id)
-    return f"\nAction: {action_id} ({action_name})\nInput: {argument}"
+    clean_arg = argument
+    if str(action_id) == "0" and argument == "Answer Generation":
+        clean_arg = "Ready to Answer" 
+    
+    return f" Action: {action_id}\nInput: {clean_arg}"
