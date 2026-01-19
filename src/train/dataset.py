@@ -36,10 +36,14 @@ def create_green_dataset(jsonl_paths: List[str], tokenizer: Any) -> Dataset:
                         prompt_text = format_prompt(pre_state)
                         completion_text = format_completion(step["action_id"], step["argument"])
                         full_text = prompt_text + completion_text + tokenizer.eos_token
+
+                        logging.warning(f"Added sample from {path}: {full_text[:300]}...")
                         
                         samples.append({
                             "text": full_text
                         })
+
+
                 except json.JSONDecodeError:
                     continue
                     
