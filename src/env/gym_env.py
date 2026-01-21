@@ -1,0 +1,101 @@
+import gymnasium as gym
+import re
+from typing import Any, Tuple, TypedDict, cast, Dict
+
+# Project Imports
+from src.env.state import create_initial_state, GreenState
+from src.env.retriever import EphemeralRetriever
+from src.env.engine import execute_action
+from src.rl.rewards import calculate_reward
+from src.agent.prompts import format_state_for_prompt
+# We can import parse_action logic or define it here. 
+# Since it was inline in the PPO script previously, we define it here for encapsulation.
+
+class GreenRAGEnv(gym.Env):
+    def __init__(self, streamer):
+        super().__init__()
+        self.streamer = streamer
+        self.data_iterator = streamer.stream()
+        self.current_sample = None
+        self.state = None
+        self.retriever = None
+        
+        # Define spaces if needed (Text based environment, spaces are formal)
+        # Using simple discrete action space is misleading as we generate text.
+        # So we leave observation/action space as "Text" type (informational).
+        try:
+            self.observation_space = gym.spaces.Text(max_length=4096)
+            self.action_space = gym.spaces.Text(max_length=512)
+        except AttributeError:
+             # Fallback for older gymnasium or if spaces.Text is experimental
+             pass
+
+    def _parse_action_text(self, text: str) -> Tuple[int, str]:
+        # Quick parser
+        act_match = re.search(r"(\d+)", text)
+        action_id = int(act_match.group(1)) if act_match else -1
+        
+        arg_match = re.search(r"Input:\s*(.*)", text, re.DOTALL)
+        raw_argument = arg_match.group(1).strip() if arg_match else ""
+        return action_id, raw_argument
+
+    def reset(self, seed=None, options=None) -> Tuple[str, dict]:
+        super().reset(seed=seed)
+        
+        try:
+            self.current_sample = next(self.data_iterator)
+        except StopIteration:
+            # Restart Dataset
+            print("Dataset exhausted, restarting streamer...")
+            self.data_iterator = self.streamer.stream()
+            self.current_sample = next(self.data_iterator)
+
+        self.state = create_initial_state(self.current_sample['question'], self.current_sample['answer'])
+        self.retriever = EphemeralRetriever(self.current_sample['corpus'])
+        
+        obs = format_state_for_prompt(cast(Dict[str, Any], self.state))
+        return obs, {}
+
+    def step(self, action_text: str) -> Tuple[str, float, bool, bool, dict]:
+        # 1. Parse
+        action_id, raw_argument = self._parse_action_text(action_text)
+
+        # 2. Sanitize (The "World Logic")
+        # Encapsulating the logic that was previously in the training loop
+        clean_argument = raw_argument
+        
+        # Sanitization: Remove artifacts if model starts repeating prompt structure
+        if "Answer Generation" in clean_argument or "Input:" in clean_argument:
+            # If the model hallucinates the prompt text "Input: ...", cut it.
+            # Simple heuristic: often the model says "Input: Answer Generation..."
+            # We treat that as empty or try to salvage.
+            # Valid query shouldn't contain these keywords usually.
+            pass # Keep logic simple for now or implement aggressive regex
+
+        # Fallback Logic
+        if len(clean_argument) < 3 and action_id in [2, 3]:
+            # If Search is active but argument is empty, fallback to the last question
+            if self.state['subqueries']:
+                clean_argument = self.state['subqueries'][-1]['question']
+
+        # 3. Execute
+        obs_text, done = execute_action(self.state, action_id, clean_argument, self.retriever)
+
+        # 4. Reward
+        reward, breakdown = calculate_reward(
+            self.state, 
+            action_text, # Passed for length penalty calculation
+            self.current_sample['answer'], 
+            action_id, 
+            done, 
+            obs_text # Passed for correctness check
+        )
+
+        # 5. Return
+        next_obs = format_state_for_prompt(cast(Dict[str, Any], self.state))
+        
+        # Important: gymnasium expects (obs, reward, terminated, truncated, info)
+        terminated = done
+        truncated = False
+        
+        return next_obs, reward, terminated, truncated, breakdown

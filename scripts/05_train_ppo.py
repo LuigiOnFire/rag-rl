@@ -15,11 +15,7 @@ from typing import Dict, Any, cast
 sys.path.append(os.getcwd())
 
 from src.data.hotpot import HotpotQAStreamer
-from src.env.state import create_initial_state
-from src.agent.prompts import format_state_for_prompt
-from src.rl.rewards import calculate_reward
-from src.env.engine import execute_action
-from src.env.retriever import EphemeralRetriever
+from src.env.gym_env import GreenRAGEnv
 
 # --- CONFIG ---
 SFT_MODEL_PATH = "models/green-rag-sft-v1"
@@ -161,26 +157,25 @@ class PPOAgentTrainer:
             
         return {"loss": loss_sum / self.config.num_ppo_epochs, "reward": score}
 
-def parse_action(text):
-    act_match = re.search(r"(\d+)", text)
-    action_id = int(act_match.group(1)) if act_match else -1
-    return action_id
-
 def main():
     print("Initializing RL Phase...")
     
-    # [Setup code remains the same...]
+    # 1. Load Models & Config
+    # We used AutoModelForCausalLMWithValueHead to wrap our SFT model
     base_model = AutoModelForCausalLMWithValueHead.from_pretrained(
         SFT_MODEL_PATH, device_map="auto", load_in_4bit=True
     )
+    # Enable gradients for LoRA adapters in 4-bit mode
     base_model = prepare_model_for_kbit_training(base_model)
     peft_model = base_model.pretrained_model
     for name, param in peft_model.named_parameters():
         if "lora" in name: param.requires_grad = True
     peft_model.enable_input_require_grads()
     
+    # Create Reference Model (Frozen copy for KL penalty)
     ref_model = create_reference_model(base_model)
     ref_model.eval()
+    
     tokenizer = AutoTokenizer.from_pretrained(SFT_MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     
@@ -192,31 +187,37 @@ def main():
     
     trainer = PPOAgentTrainer(config, base_model, ref_model, tokenizer)
     
-    print("Starting Training Loop (Monte Carlo Rollouts)...")
+    print("Starting Training Loop (Gymnasium Rollouts)...")
+    
+    # 2. Initialize Gymnasium Environment
+    # The environment handles the dataset streaming internally
     streamer = HotpotQAStreamer(split="train", limit=50)
+    env = GreenRAGEnv(streamer)
     
     GAMMA = 0.99  # Discount factor for future rewards
 
-    for sample_idx, sample in enumerate(streamer.stream()):
-        question = sample['question']
-        ground_truth = sample['answer']
-        corpus = sample['corpus']
-        
+    # Episode Loop
+    for episode in range(50):
         # Reset Env
-        retriever = EphemeralRetriever(corpus)
-        state = create_initial_state(question)
-        
-        # --- 1. ROLLOUT PHASE (Collect Experience) ---
+        obs_text, info = env.reset()
+        if obs_text is None:
+            print("dataset exhausted")
+            break
+            
         episode_buffer = [] # Stores (query, response, immediate_reward)
         
+        # Step Loop
         for step_i in range(MAX_STEPS):
-            # A. Prompt
-            query_txt = format_state_for_prompt(cast(Dict[str, Any], state)) + " Action:"
+            # A. Prompt (Observation)
+            # The Env gives us the state text. We append "Action:" to prompt the model.
+            query_txt = obs_text + " Action:"
+            
             # Ensure query is on the correct device
-            query_tensor = tokenizer.encode(query_txt, return_tensors="pt").to(next(base_model.parameters()).device)
+            device = next(base_model.parameters()).device
+            query_tensor = tokenizer.encode(query_txt, return_tensors="pt").to(device)
             attention_mask = (query_tensor != tokenizer.pad_token_id).long()
             
-            # B. Generate
+            # B. Generate Action
             gen_kwargs = {
                 "min_length": -1, 
                 "top_k": 0.0, 
@@ -229,39 +230,28 @@ def main():
             }
             response_tensor = trainer.generate(query_tensor, **gen_kwargs)
             
-            # C. Execute
+            # C. Execute in Env
+            # Decode the generated response to text for the environment
             response_txt_only = tokenizer.decode(response_tensor[0][query_tensor.shape[1]:])
-            action_id = parse_action(response_txt_only)
-            arg_match = re.search(r"Input:\s*(.*)", response_txt_only, re.DOTALL)
-            argument = arg_match.group(1).strip() if arg_match else ""
-
-            # --- ADD THIS BLOCK ---
-            # Action 2 and 3 are usually the search actions in your config
-            if action_id in [2, 3]: 
-                logger.info(f"Step {step_i}: Performing search with query: '{argument}'")
-            # ----------------------
             
-            obs, done = execute_action(state, action_id, argument, retriever)
-            
-            # D. Immediate Reward (Cost/Penalty)
-            reward_scalar, breakdown = calculate_reward(
-                state, response_txt_only, ground_truth, action_id, done, obs
-            )
+            # Env.step handles: Parsing -> API Calls -> State Update -> Reward Calculation
+            next_obs, reward, terminated, truncated, info = env.step(response_txt_only)
             
             # Store in buffer
             episode_buffer.append({
                 "query": query_tensor,
                 "response": response_tensor,
-                "reward": reward_scalar,
-                "action_id": action_id
+                "reward": reward
             })
             
-            print(f"  Step {step_i} | Act: {action_id} | Immediate R: {reward_scalar:.2f}")
+            print(f"  Ep {episode}|St {step_i} | Reward: {reward:.2f}")
             
-            if done:
+            if terminated or truncated:
                 break
+            
+            obs_text = next_obs
         
-        # --- 2. CREDIT ASSIGNMENT (Backpropagation of Rewards) ---
+        # --- 3. CREDIT ASSIGNMENT (Backpropagation of Rewards) ---
         # Calculate Discounted Return (G_t) backwards
         # G_t = r_t + gamma * G_{t+1}
         cumulative_return = 0.0
@@ -271,7 +261,7 @@ def main():
             cumulative_return = step_data["reward"] + GAMMA * cumulative_return
             step_data["discounted_return"] = cumulative_return
             
-        # --- 3. OPTIMIZATION PHASE (Update Model) ---
+        # --- 4. OPTIMIZATION PHASE (Update Model) ---
         print(f"  >> Updating Model on {len(episode_buffer)} steps...")
         
         total_loss = 0
@@ -283,10 +273,10 @@ def main():
             )
             total_loss += stats['loss']
             
-        print(f"Sample {sample_idx} Complete | Avg Loss: {total_loss/len(episode_buffer):.4f}")
+        print(f"Episode {episode} Complete | Avg Loss: {total_loss/len(episode_buffer):.4f}")
 
         # Saving Logic
-        if sample_idx > 0 and sample_idx % 10 == 0:
+        if episode > 0 and episode % 10 == 0:
             if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
             print("Saving checkpoint...")
             base_model.save_pretrained(OUTPUT_DIR)
