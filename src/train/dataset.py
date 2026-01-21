@@ -64,8 +64,24 @@ def format_prompt(state: Dict[str, Any]) -> str:
     return format_state_for_prompt(state)
 
 def format_completion(action_id: int, argument: str) -> str:
-    clean_arg = argument
-    if str(action_id) == "0" and argument == "Answer Generation":
-        clean_arg = "Ready to Answer" 
+    """
+    Constructs the target string (the Action).
+    Logic:
+    - If Action 0/1 (Answer): Stop immediately after the digit. No 'Input:'.
+    - If Action 2+ (Tool): Include 'Input: {argument}'.
+    """
     
-    return f" Action: {action_id}\nInput: {clean_arg}"
+    # --- FIX: STRICT CUTOFF FOR ANSWER ACTIONS ---
+    if int(action_id) in [0, 1]:
+        # The model sees: "Action: 0" -> [EOS]
+        # It never sees "Input: Answer Generation" or even "Input: "
+        return f" Action: {action_id}"
+        
+    # --- LOGIC FOR TOOLS (Search, etc.) ---
+    else:
+        # Sanitize garbage just in case the trajectory generator messed up
+        clean_arg = argument
+        if "Answer Generation" in clean_arg:
+            clean_arg = "" 
+            
+        return f" Action: {action_id}\nInput: {clean_arg}"

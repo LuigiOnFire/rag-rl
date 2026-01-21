@@ -39,9 +39,9 @@ def execute_action(state: GreenState, action_id: int, argument: str, retriever: 
             
         results = []
         if action_id == actions.ACTION_RET_KEY:
-            results = retriever.search_bm25(clean_query, top_k=3)
+            results = retriever.search_bm25(clean_query, k=3)
         else:
-            results = retriever.search_dense(clean_query, top_k=3)
+            results = retriever.search_dense(clean_query, k=3)
             
         obs = f"Found {len(results)} docs."
         

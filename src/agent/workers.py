@@ -1,5 +1,5 @@
 import ollama
-from typing import TypedDict, Any
+from typing import List, TypedDict, Any
 from src.env.state import GreenState
 
 # Models
@@ -92,3 +92,44 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     """
     
     return worker.generate(prompt).strip()
+
+def _format_history(history: List[Any]) -> str:
+    """Formats the conversation history for the worker context."""
+    out = []
+    for h in history:
+        # Assuming h is a dict with action_name and observation
+        name = h.get('action_name', 'UNKNOWN')
+        obs = h.get('observation', '')
+        out.append(f"Action: {name} -> Obs: {obs}")
+    return "\n".join(out)
+
+def generate_plan(state: GreenState, use_llm: bool = False) -> str:
+    """
+    Action 7/8 (Optional Support): Generates a step-by-step plan if the Director
+    delegates the planning process entirely.
+    """
+    worker = llm_worker if use_llm else slm_worker
+    
+    # 1. Contextual Prompt
+    history_str = _format_history(state['history'])
+    main_query = state['main_query']
+    
+    prompt = f"""
+    Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
+    Constraint: Return ONLY the numbered list. No intro, no filler.
+    
+    Main Question: "{main_query}"
+    
+    Context (What we've done so far):
+    {history_str}
+    
+    Plan:
+    """
+    
+    # 2. Generate
+    raw_plan = worker.generate(prompt)
+    
+    # 3. Cleaning
+    clean_plan = raw_plan.replace("Here is the plan:", "").strip()
+    
+    return clean_plan

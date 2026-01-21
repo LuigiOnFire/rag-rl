@@ -24,7 +24,7 @@ class HotpotQAStreamer:
             # We use 'distractor' because it provides the Gold Paragraphs + Hard Negatives
             # This is ideal for our "Ephemeral Index" strategy.
             logger.info(f"Loading HotpotQA (distractor) split='{split}'...")
-            self.dataset = load_dataset("hotpot_qa", "distractor", split=split, trust_remote_code=True)
+            self.dataset = load_dataset("hotpot_qa", "distractor", split=split) # NOTE: I removed trust_remote_code=True due to a hugging face error.
             
             if self.limit:
                 logger.info(f"Limiting dataset to first {self.limit} samples.")

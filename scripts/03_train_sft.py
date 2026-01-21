@@ -59,8 +59,10 @@ def load_and_clean_dataset(run_dir: str, tokenizer: Any) -> Dataset:
                         # Split by Action 0 or Action 1 and discard the tail
                         if "Action: 0" in text:
                             text = text.split("Action: 0")[0] + " Action: 0"
+                            logging.info("Removed 'Answer Generation' artifact at Action: 0")
                         elif "Action: 1" in text:
                             text = text.split("Action: 1")[0] + " Action: 1"
+                            logging.info("Removed 'Answer Generation' artifact at Action: 1")
                     
                     # Also strip trailing "Input:" if it was left dangling
                     text = text.replace("Input: Ready to Answer", "")
@@ -174,20 +176,6 @@ def main():
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "v_proj"] 
     )
-
-    # training_args = TrainingArguments(
-    #     output_dir=OUTPUT_DIR,
-    #     num_train_epochs=10,        # 10 Epochs is safe with masking
-    #     per_device_train_batch_size=2,
-    #     gradient_accumulation_steps=4,
-    #     learning_rate=2e-4,
-    #     logging_steps=10,
-    #     save_strategy="epoch",
-    #     fp16=True,
-    #     max_grad_norm=0.3,
-    #     warmup_ratio=0.03,
-    #     lr_scheduler_type="cosine",
-    # )
 
     logger.info("Starting SFT...")
     training_args = SFTConfig(

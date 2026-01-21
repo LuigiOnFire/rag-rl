@@ -237,7 +237,7 @@ class OracleSearch:
 
                     elif action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
                         ans = workers.generate_answer(new_state, use_llm=(action_id==actions.ACTION_GEN_LLM))
-                        argument = "Answer Generation"
+                        argument = ""
                         observation = ans
                         
                         # Update Answer
