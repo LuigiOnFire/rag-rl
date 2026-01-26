@@ -1,6 +1,7 @@
 import ollama
 from typing import List, TypedDict, Any
-from src.env.state import GreenState
+from src.env.state import GreenState, get_active_subquery
+from src.env.retriever import EphemeralRetriever
 
 # Models
 MODEL_SLM = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest"
@@ -25,40 +26,12 @@ class LLMWorker:
 slm_worker = LLMWorker(MODEL_SLM)
 llm_worker = LLMWorker(MODEL_LLM)
 
-def _get_active_subquery(state: GreenState):
-    # Find last active or pending
-    for sub in reversed(state['subqueries']):
-        if sub['status'] in ["ACTIVE", "PENDING"]:
-            return sub
-    return state['subqueries'][0] # Fallback
-
 # --- CORE SKILLS (Director Delegates These) ---
-
-def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> str:
-    """
-    Action 4/5: The Director says 'Check this doc', the Worker reads it.
-    """
-    active_sub = _get_active_subquery(state)
-    worker = llm_worker if use_llm else slm_worker
-    
-    prompt = f"""
-    Task: Check if the Document contains information relevant to the Question.
-    Question: "{active_sub['question']}"
-    
-    Document:
-    "{doc_text[:2000]}" ... (truncated)
-    
-    Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
-    """
-    
-    result = worker.generate(prompt).strip().lower()
-    return "Relevant" if "relevant" in result else "Irrelevant"
-
 def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     """
     Action 0/1: Synthesize facts into an answer.
     """
-    active_sub = _get_active_subquery(state)
+    active_sub = get_active_subquery(state)
     worker = llm_worker if use_llm else slm_worker
     
     # 1. Gather Context
@@ -92,6 +65,70 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     """
     
     return worker.generate(prompt).strip()
+
+def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) -> str:
+    """
+    Look at the state and output a search string.
+    Does NOT connect to any database.
+    """
+    active_sub = get_active_subquery(state)
+    if use_llm:
+        worker = llm_worker
+    else:
+        worker = slm_worker
+    
+    prompt = f"""
+    Task: Create a concise search query to find information relevant to the Question.
+    Question: "{active_sub['question']}"
+    
+    Constraint: Keep it under 10 words. Focus on key terms.
+    
+    Search Query:
+    """
+    
+    return worker.generate(prompt).strip()
+
+def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -> str:
+    """
+    Look at the state and output a search string.
+    Does NOT connect to any database.
+    """
+    active_sub = get_active_subquery(state)
+    if use_llm:
+        worker = llm_worker
+    else:
+        worker = slm_worker
+    
+    prompt = f"""
+    Task: Create a concise search query to find information relevant to the Question.
+    Question: "{active_sub['question']}"
+    
+    Constraint: Keep it under 10 words. Focus on key terms.
+    
+    Search Query:
+    """
+    
+    return worker.generate(prompt).strip()
+    
+def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> str:
+    """
+    Action 4/5: The Director says 'Check this doc', the Worker reads it.
+    """
+    active_sub = get_active_subquery(state)
+    worker = llm_worker if use_llm else slm_worker
+    
+    prompt = f"""
+    Task: Check if the Document contains information relevant to the Question.
+    Question: "{active_sub['question']}"
+    
+    Document:
+    "{doc_text[:2000]}" ... (truncated)
+    
+    Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
+    """
+    
+    result = worker.generate(prompt).strip().lower()
+    return "Relevant" if "relevant" in result else "Irrelevant"
 
 def _format_history(history: List[Any]) -> str:
     """Formats the conversation history for the worker context."""

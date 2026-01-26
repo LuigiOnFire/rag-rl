@@ -57,3 +57,11 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
         "history": [],
         "judge_log": None
     }
+
+def get_active_subquery(state: GreenState):
+    # Find last active or pending
+    for sub in reversed(state['subqueries']):
+        if sub['status'] in ["ACTIVE", "PENDING"]:
+            sub['status'] = "ACTIVE"  # Mark as active
+            return sub
+    return state['subqueries'][0] # Fallback

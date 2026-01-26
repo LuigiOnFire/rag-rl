@@ -12,28 +12,16 @@ sys.path.append(os.getcwd())
 # Imports
 from src.env.state import create_initial_state, GreenState, Document
 from src.agent.prompts import format_state_for_prompt
-from src.agent import actions, workers
+from src.agent import actions
 from src.data.hotpot import HotpotQAStreamer
+from src.env.retriever import EphemeralRetriever
+from src.env.engine_old import execute_action
 
 # --- CONFIG ---
 BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 # KEY CHANGE: Point to the RL-trained model
 ADAPTER_PATH = "models/green-rag-rl-v1" 
 MAX_STEPS = 5
-
-class EphemeralRetriever:
-    def __init__(self, corpus: List[str]):
-        self.corpus = corpus
-        
-    def search(self, query: str, top_k: int = 2):
-        query_words = set(query.lower().split())
-        scores = []
-        for doc in self.corpus:
-            doc_lower = doc.lower()
-            score = sum(1 for w in query_words if w in doc_lower)
-            scores.append((score, doc))
-        scores.sort(key=lambda x: x[0], reverse=True)
-        return [item[1] for item in scores[:top_k]]
 
 def load_director():
     print(f"Loading RL Director from {ADAPTER_PATH}...")
@@ -87,84 +75,6 @@ def get_director_action(model, tokenizer, state: GreenState):
         argument = arg_match.group(1).strip()
         
     return action_id, argument
-
-def execute_action(state: GreenState, action_id: int, argument: str, retriever: EphemeralRetriever):
-    obs = ""
-    done = False
-    action_name = actions.get_action_name(action_id)
-    
-    print(f"  >> Executing: [{action_id}] {action_name}")
-    
-    # 1. ANSWER (Strict Mode)
-    if action_id in [0, 1]:
-        print("  [>] Calling Worker for Answer Generation...")
-        use_llm = (action_id == 1)
-        obs = workers.generate_answer(state, use_llm=use_llm)
-        done = True 
-
-    # 2. SEARCH
-    elif action_id in [2, 3]:
-        clean_query = argument.strip()
-        # Fallback if RL model learned to be TOO silent
-        if len(clean_query) < 3: 
-            clean_query = state['subqueries'][-1]['question']
-            
-        print(f"  [>] Searching for: '{clean_query}'")
-        results = retriever.search(clean_query, top_k=2)
-        obs = f"Found {len(results)} docs."
-        
-        # Log retrieved docs for debugging
-        for i, doc in enumerate(results):
-             print(f"    Doc {i}: {doc[:80]}...")
-
-        formatted_docs: List[Document] = [
-            cast(Document, {"title": "Doc", "content": r, "relevance": "UNKNOWN"}) 
-            for r in results
-        ]
-        if state['subqueries']:
-            state['subqueries'][-1]['documents'].extend(formatted_docs)
-
-    # 3. GRADE
-    elif action_id in [4, 5]:
-        if state['subqueries'] and state['subqueries'][-1]['documents']:
-            last_doc = state['subqueries'][-1]['documents'][-1]
-            grade = workers.generate_grade(state, last_doc['content'], use_llm=(action_id==5))
-            
-            # Safe cast for literal
-            grade_upper = grade.upper()
-            if grade_upper in ["RELEVANT", "IRRELEVANT", "UNKNOWN"]:
-                 last_doc['relevance'] = cast(Literal["UNKNOWN", "RELEVANT", "IRRELEVANT"], grade_upper)
-            else:
-                 last_doc['relevance'] = "UNKNOWN"
-                 
-            obs = f"Document marked {grade.upper()}"
-        else:
-            obs = "No documents to grade."
-
-    # 4. REWRITE / DECOMPOSE / FAIL
-    elif action_id == 6:
-        if state['subqueries']:
-            state['subqueries'][-1]['question'] = argument 
-            obs = f"Query updated: {argument}"
-        else:
-            obs = "No query."
-    elif action_id in [7, 8]:
-        new_id = str(len(state['subqueries']) + 1)
-        state['subqueries'].append({
-            "id": new_id,
-            "question": argument, 
-            "status": "ACTIVE", 
-            "documents": [], 
-            "answer": None
-        })
-        obs = f"Plan updated: {argument}"
-    elif action_id == 9:
-        obs = "Failure declared."
-        done = True
-    else:
-        obs = f"Error: Unknown Action {action_id}"
-
-    return obs, done
 
 def run_hotpot_episode(model, tokenizer, sample: dict):
     question = sample['question']

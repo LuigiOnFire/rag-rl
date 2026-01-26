@@ -5,7 +5,7 @@ from typing import Any, Tuple, TypedDict, cast, Dict
 # Project Imports
 from src.env.state import create_initial_state, GreenState
 from src.env.retriever import EphemeralRetriever
-from src.env.engine import execute_action
+from src.env.engine_old import execute_action
 from src.rl.rewards import calculate_reward
 from src.agent.prompts import format_state_for_prompt
 # We can import parse_action logic or define it here. 
@@ -57,6 +57,16 @@ class GreenRAGEnv(gym.Env):
         return obs, {}
 
     def step(self, action_text: str) -> Tuple[str, float, bool, bool, dict]:
+        # --- ARTIFACT CLEANER ---
+        # 1. Strip Token Garbage
+        for bad_token in ["<|eot_id|>", "<|end_of_text|>", "</s>"]:
+            action_text = action_text.replace(bad_token, "")
+            
+        # 2. Strip "Input" loops (The "Moths" case in Ep 6)
+        # If the model starts babbling "Input 7 Input 4...", cut it.
+        if "Input" in action_text and len(action_text) > 100:
+             action_text = action_text.split("Input")[0]
+
         # 1. Parse
         action_id, raw_argument = self._parse_action_text(action_text)
 
@@ -64,6 +74,17 @@ class GreenRAGEnv(gym.Env):
         # Encapsulating the logic that was previously in the training loop
         clean_argument = raw_argument
         
+        # --- ROBUST INJECTION FIX ---
+        # If Action 1 (Answer) and argument is empty or just whitespace/garbage
+        if action_id == 1:
+            # Check if it has meaningful text (at least 3 alphanumeric chars)
+            has_text = len([c for c in clean_argument if c.isalnum()]) > 3
+            
+            if not has_text:
+                # DON'T send a generic instruction.
+                # DO send the original Question.
+                clean_argument = self.state['main_query']
+
         # Sanitization: Remove artifacts if model starts repeating prompt structure
         if "Answer Generation" in clean_argument or "Input:" in clean_argument:
             # If the model hallucinates the prompt text "Input: ...", cut it.

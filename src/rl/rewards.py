@@ -2,27 +2,35 @@ import re
 import os
 import json
 import logging
-from typing import List, Tuple
-from rouge_score import rouge_scorer
+import collections
+import string
+from typing import Tuple
 from src.env.state import GreenState
-from src.agent import actions, workers
+from src.oracle.judge import SoftJudge
 
 # --- CONFIG ---
-REWARD_CORRECT = 1.0        # Huge bonus for solving it
-REWARD_FORMAT_ERROR = -0.5  # Penalty for hallucinating nonsense
-REWARD_WRONG = -0.50        # Small penalty for wrong answer
-REWARD_LAZY = -0.5          # Extra penalty for answering wrong with NO docs
+REWARD_CORRECT = 1.0        # The Goal
+REWARD_DISCOVERY = 0.5      # <--- BIG COOKIE. Incentivize finding docs.
+REWARD_WRONG = -0.5         # Penalty for failure
+REWARD_LAZY = -0.5          # Extra penalty for guessing without looking
+REWARD_REPEAT = -1.0        # Penalty for exact repeated actions (Insanity)
+REWARD_FORMAT = -0.5        # Penalty for broken syntax
 
-# Cost Settings
-COST_TOOL_USE = 0.05        # Cost for using Search/LLM (Encourage efficiency)
-PENALIZE_COST = True      # Whether to penalize cost at all
+# --- PHASE 1 SETTINGS: COSTS DISABLED ---
+# We calculate costs for logging, but do NOT subtract them from reward.
+# This allows the agent to learn "how" to search before learning efficiency.
+PENALIZE_COST = False       
+COST_TOOL_USE = 0.0
 
-# Average tokens per output (Estimated)
+# Constants for Cost Calculation (Used for logging only in Phase 1)
 AVG_CALIBRATOR_TOKENS = 40 
-# Scaling factor to convert Joules to Reward Penalty (to prevent scale collapse)
 JOULES_TO_REWARD_SCALE = 1e-4
 
-# Load Cost Table
+# Threshold for Partial Credit (Safety Net)
+F1_THRESHOLD = 0.25
+
+# --- LOAD COST TABLE ---
+# This is the missing piece!
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 COST_TABLE_PATH = os.path.join(BASE_DIR, "data", "meta", "cost_table.json")
 
@@ -30,14 +38,33 @@ try:
     with open(COST_TABLE_PATH, "r") as f:
         ACT_COSTS = json.load(f)
 except Exception as e:
+    # Fallback if file is missing
     print(f"Warning: Could not load cost table from {COST_TABLE_PATH}: {e}")
     ACT_COSTS = {}
 
-
-scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
-
-logging.basicConfig(level=logging.INFO)
+# Initialize Judge
+judge = SoftJudge()
 logger = logging.getLogger(__name__)
+
+# --- HELPERS ---
+def normalize_answer(s):
+    def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
+    def white_space_fix(text): return ' '.join(text.split())
+    def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
+    def lower(text): return text.lower()
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def compute_f1(prediction, ground_truth):
+    pred_tokens = normalize_answer(prediction).split()
+    truth_tokens = normalize_answer(ground_truth).split()
+    if not pred_tokens or not truth_tokens: return 0.0
+    common = collections.Counter(pred_tokens) & collections.Counter(truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0: return 0.0
+    precision = 1.0 * num_same / len(pred_tokens)
+    recall = 1.0 * num_same / len(truth_tokens)
+    return (2 * precision * recall) / (precision + recall)
+# ----------------
 
 def calculate_reward(
     state: GreenState, 
@@ -47,77 +74,95 @@ def calculate_reward(
     done: bool,
     obs: str
 ) -> Tuple[float, dict]:
-    """
-    Calculates the reward for a single step.
-    Returns: (Total Reward, Breakdown Dict)
-    """
-    total_reward = 0.0
-    breakdown: dict[str, float] = {"correct": 0.0, "format": 0.0, "cost": 0.0}
     
-    # 1. FORMAT PENALTY
-    # If the parser failed (action_id is -1 or 9), punish hard.
+    total_reward = 0.0
+    breakdown = {"correct": 0.0, "format": 0.0, "bonus": 0.0, "cost": 0.0}
+
+    # 1. FORMAT & REPETITION CHECKS
     if action_id in [-1, 9]:
-        r = REWARD_FORMAT_ERROR # Should be highly negtative
-        total_reward += r
-        breakdown['format'] = r
+        total_reward += REWARD_FORMAT
+        breakdown['format'] = REWARD_FORMAT
         return total_reward, breakdown
 
-    # 2. COST PENALTY (Length)
-    # Penalize every character generated to cure verbosity/artifacts.
-    # "Action: 2 Input: Search" (20 chars) vs "Action: 2 Input: Answer Generation... Search" (50 chars)
-    token_proxy = len(generated_text) / 4.0
+    # Check for exact repetition (Insanity)
+    history = state.get('history', [])
+    if len(history) > 0:
+        last_step = history[-1]
+        if last_step.get('action_id') == action_id:
+             # Basic check: if Action ID is the same for Search, it might be a loop.
+             # Ideally we check arguments too, but this is a safe heuristic for now.
+             pass 
+
+    # 2. DISCOVERY BONUS (The "Curriculum Driver")
+    # Only reward the FIRST successful search in an episode.
+    is_search_action = (action_id in [2, 3])
+    has_found_docs = ("Found" in obs and "Found 0 docs" not in obs)
     
-    # Dynamic Cost Calculation
-    # cost_per_token = [corresponding_action] / [average_tokens]
-    # We apply a scaling factor to normalize Joules to Reward space
+    if is_search_action and has_found_docs:
+        # Check history: How many times have we tried Action 2 or 3 before?
+        history = state.get('history', [])
+        
+        # Count prior search actions (Robust integer check, no string parsing)
+        prior_search_count = sum(1 for h in history if h.get('action_id') in [2, 3])
+        
+        if prior_search_count == 0:
+            # First time? Here is your cookie.
+            total_reward += REWARD_DISCOVERY
+            breakdown['bonus'] += REWARD_DISCOVERY
+            logger.info(f"🍪 First Discovery Bonus! (+{REWARD_DISCOVERY})")
+        else:
+            # Second time? No cookie. Get back to work.
+            logger.info(f"🚫 No Bonus: Search action already used {prior_search_count} times.")
+
+    # 3. OUTCOME REWARD
+    if done and action_id in [0, 1]:
+        is_correct, reason = judge.judge(obs, ground_truth)
+        
+        if is_correct:
+            total_reward += REWARD_CORRECT
+            breakdown['correct'] = REWARD_CORRECT
+        else:
+            # Partial Credit (F1 Safety Net)
+            f1 = compute_f1(obs, ground_truth)
+            if f1 >= F1_THRESHOLD:
+                partial = f1 ** 2
+                total_reward += partial
+                breakdown['correct'] = partial
+                logger.info(f"⚠️ Partial Credit: F1 {f1:.2f} -> Reward {partial:.2f}")
+            else:
+                # Wrong Answer
+                p = REWARD_WRONG
+                
+                # Laziness Check
+                has_docs = False
+                if 'subqueries' in state:
+                     for sq in state['subqueries']:
+                        if sq.get('documents'): has_docs = True
+                if not has_docs:
+                    for h in history:
+                        if "Found" in str(h.get('observation','')) and "Found 0 docs" not in str(h.get('observation','')):
+                            has_docs = True
+                
+                if not has_docs:
+                    p += REWARD_LAZY 
+                
+                total_reward += p
+                breakdown['correct'] = p
+
+    # 4. SILENT COST TRACKING
+    # We calculate the Joules but only subtract if PENALIZE_COST is True.
+    token_proxy = len(generated_text) / 4.0
     action_joules = ACT_COSTS.get(str(action_id), 0.0)
     joules_per_token = action_joules / AVG_CALIBRATOR_TOKENS
     reward_cost_per_token = joules_per_token * JOULES_TO_REWARD_SCALE
     
-    cost = token_proxy * reward_cost_per_token
+    # Calculate hypothetical cost
+    step_cost = (token_proxy * reward_cost_per_token) + COST_TOOL_USE
     
-    # 3. TOOL COST
-    # Penalize engaging the engine (Search or LLM call)
-    cost += COST_TOOL_USE
-    breakdown['cost'] = -cost
+    # Always log it negative so it looks like a cost in the breakdown
+    breakdown['cost'] = -step_cost 
 
     if PENALIZE_COST:
-        total_reward -= cost
-
-    # 4. OUTCOME REWARD
-    # If the episode ended (Action 0/1 Answer), did we get it right?
-    if done and action_id in [0, 1]:
-        # Compare 'obs' (the Answer) with 'ground_truth'
-        # We use ROUGE-L (Overlap) or Exact Match
-        # For strict correctness:
-        scores = scorer.score(ground_truth, obs)
-        rouge_l = scores['rougeL'].fmeasure
-        logger.info(f"ROUGE-L score: {rouge_l}")
-        
-        # Threshold for "Correct"
-        if rouge_l > 0.3: # Loose threshold for HotpotQA
-            r = REWARD_CORRECT * (rouge_l * 2) # Scale by confidence
-            # Cap at max reward
-            r = min(r, REWARD_CORRECT)
-            total_reward += r
-            breakdown['correct'] = r
-        else:
-            p = REWARD_WRONG
-            has_docs = False
-            if 'subqueries' in state:
-                for sq in state['subqueries']:
-                    if 'retrieved_docs' in sq and len(sq['retrieved_docs']) > 0:
-                        has_docs = True
-                        break
-            
-            if not has_docs:
-                p += REWARD_LAZY # Penalize for guessing wrong without effot
-            
-    # 5. INTERMEDIATE REWARDS (The "Cookie")
-    # Bootstrap: Tiny reward for successfully finding documents
-    # if action_id in [2, 3] and "Found" in obs:
-    #     if "Found 0 docs" not in obs:
-    #         total_reward += 0.1
-    #         breakdown['correct'] += 0.1
+        total_reward -= step_cost
 
     return total_reward, breakdown

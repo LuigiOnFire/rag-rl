@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import AutoTokenizer
+from transformers import GenerationConfig
 from trl.trainer.ppo_config import PPOConfig
 from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
 from trl.models.utils import create_reference_model
@@ -21,11 +22,17 @@ from src.env.gym_env import GreenRAGEnv
 SFT_MODEL_PATH = "models/green-rag-sft-v1"
 OUTPUT_DIR = "models/green-rag-rl-v1"
 MAX_STEPS = 5  # Max turns per episode
+EPISODE_COUNT = 4000 # Total episodes to train
+LOG_FILE = "ppo_training_log.txt"
 
 logging.basicConfig(
     level=logging.INFO,       # Set to logging.DEBUG for more verbosity
     format='%(message)s',     # Just print the message (no time, no level name)
-    # format='[%(levelname)s] %(message)s' # Alternative: simple level tag + message
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='w'),
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True
 )
 
 # 2. Create a logger object
@@ -45,6 +52,9 @@ class PPOAgentTrainer:
             raise ValueError("No trainable parameters found! Check PEFT/LoRA config.")
         
         self.optimizer = AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=config.learning_rate)
+
+        self.batch_counter = 0
+        self.gradient_accumulation_steps = config.gradient_accumulation_steps
         
     def log_probs_from_logits(self, logits, labels):
         logp = F.log_softmax(logits, dim=-1)
@@ -59,6 +69,8 @@ class PPOAgentTrainer:
 
     def step(self, query, response, score):
         device = query.device
+
+        self.batch_counter += 1
 
         # 1. Setup
         q_len = query.shape[1]
@@ -150,10 +162,17 @@ class PPOAgentTrainer:
             loss = pg_loss + 0.5 * v_loss
             
             self.optimizer.zero_grad()
+
+            loss = loss / self.gradient_accumulation_steps
+            
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0) # Safety clip
-            self.optimizer.step()
-            loss_sum += loss.item()
+            
+            if self.batch_counter % self.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0) # Safety clip
+                self.optimizer.step()
+                self.optimizer.zero_grad() # <--- Clear the pile AFTER update
+
+                loss_sum += loss.item()
             
         return {"loss": loss_sum / self.config.num_ppo_epochs, "reward": score}
 
@@ -179,7 +198,15 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(SFT_MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     
-    config = PPOConfig(learning_rate=1.41e-5, batch_size=1, mini_batch_size=1)
+    config = PPOConfig(
+        learning_rate=1.41e-5, 
+        batch_size=1, 
+        mini_batch_size=1, 
+        gradient_accumulation_steps=8,
+        kl_coef=0.05,
+        temperature=1.0,
+        gamma=0.99,
+    )
     
     # Optimizer Check
     trainable_params = list(filter(lambda p: p.requires_grad, base_model.parameters()))
@@ -191,13 +218,13 @@ def main():
     
     # 2. Initialize Gymnasium Environment
     # The environment handles the dataset streaming internally
-    streamer = HotpotQAStreamer(split="train", limit=50)
+    streamer = HotpotQAStreamer(split="train", limit=None)
     env = GreenRAGEnv(streamer)
     
     GAMMA = 0.99  # Discount factor for future rewards
 
     # Episode Loop
-    for episode in range(50):
+    for episode in range(EPISODE_COUNT):
         # Reset Env
         obs_text, info = env.reset()
         if obs_text is None:
@@ -206,37 +233,71 @@ def main():
             
         episode_buffer = [] # Stores (query, response, immediate_reward)
         
-        # Step Loop
         for step_i in range(MAX_STEPS):
             # A. Prompt (Observation)
-            # The Env gives us the state text. We append "Action:" to prompt the model.
             query_txt = obs_text + " Action:"
-            
-            # Ensure query is on the correct device
             device = next(base_model.parameters()).device
+
+            decay_span = int(EPISODE_COUNT * 0.25)
+            force_probability = max(0.05, 1.0 - (episode / decay_span))
+            
+            forced_action = ""
+            if step_i == 0: 
+                 import random
+                 if random.random() < force_probability:
+                     forced_action = " 2" 
+                     logger.info(f"FORCE: Pushing Agent to Search (Step 0) | Prob: {force_probability:.2f}")
+                     
+            # If we are forcing, we append it to the INPUT QUERY so the model completes it
+            if forced_action:
+                 query_txt += forced_action
+                 
             query_tensor = tokenizer.encode(query_txt, return_tensors="pt").to(device)
             attention_mask = (query_tensor != tokenizer.pad_token_id).long()
             
             # B. Generate Action
-            gen_kwargs = {
-                "min_length": -1, 
-                "top_k": 0.0, 
-                "top_p": 0.9, 
-                "do_sample": True,
-                "pad_token_id": tokenizer.eos_token_id,
-                "repetition_penalty": 1.15,
-                "max_new_tokens": 40,
-                "attention_mask": attention_mask
-            }
-            response_tensor = trainer.generate(query_tensor, **gen_kwargs)
+            generation_config = GenerationConfig(                 
+                do_sample=True,
+                top_p=0.9,
+                temperature=1.0, 
+                repetition_penalty=1.2,
+                max_new_tokens=40,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id            
+            )
+            response_tensor = trainer.generate(query_tensor, generation_config=generation_config)
             
-            # C. Execute in Env
-            # Decode the generated response to text for the environment
+            # C. Decode Response
+            # This creates 'response_txt_only' for the first time
             response_txt_only = tokenizer.decode(response_tensor[0][query_tensor.shape[1]:])
+            
+            # --- PART B: STITCHING (AFTER GENERATION) ---
+            if forced_action:
+                 # The model generated "Input: xyz". We need to attach " Action: 2" to the front.
+                 
+                 # Safety: Ensure there is a newline separation
+                 if not response_txt_only.startswith("\n") and not response_txt_only.startswith(" "):
+                     response_txt_only = "\n" + response_txt_only
+                     
+                 full_action = f" Action:{forced_action}{response_txt_only}"
+                 response_txt_only = full_action
+            # --------------------------------------------
             
             # Env.step handles: Parsing -> API Calls -> State Update -> Reward Calculation
             next_obs, reward, terminated, truncated, info = env.step(response_txt_only)
             
+            # Env.step handles: Parsing -> API Calls -> State Update -> Reward Calculation
+            next_obs, reward, terminated, truncated, info = env.step(response_txt_only)
+            
+            logger.info(f"\n--- Ep {episode} | Step {step_i} ---")
+            logger.info(f"OBSERVATION (Prompt end): ...{query_txt[-200:]}")
+            logger.info(f"ACTION GENERATED: {response_txt_only.strip()}")
+            logger.info(f"REWARD: {reward}")
+            if info:
+                 logger.info(f"INFO: {info}")
+            if next_obs:
+                 logger.info(f"NEXT STATE (Preview): {next_obs[:100]}...")
+
             # Store in buffer
             episode_buffer.append({
                 "query": query_tensor,
@@ -247,10 +308,27 @@ def main():
             print(f"  Ep {episode}|St {step_i} | Reward: {reward:.2f}")
             
             if terminated or truncated:
+                logger.info(">>> TERMINATED")
                 break
             
             obs_text = next_obs
         
+        # --- ADD THIS BLOCK ---
+        # "Did Not Finish" (DNF) Check
+        if not terminated:
+             # If the loop finished but the agent never answered (Action 0/1),
+             # it means it wasted all its turns searching or looping.
+             # We apply a massive penalty to the LAST action it took.
+             
+             DNF_PENALTY = -1.5  # Make this painful (worse than answering wrong)
+             
+             if len(episode_buffer) > 0:
+                 episode_buffer[-1]['reward'] += DNF_PENALTY
+                 print(f"  ⚠️ DNF Penalty Applied! Agent timed out.")
+        
+        total_episode_reward = sum(step['reward'] for step in episode_buffer)
+        print(f"🏁 Episode {episode} Final Score: {total_episode_reward:.2f}")
+            
         # --- 3. CREDIT ASSIGNMENT (Backpropagation of Rewards) ---
         # Calculate Discounted Return (G_t) backwards
         # G_t = r_t + gamma * G_{t+1}
@@ -276,7 +354,7 @@ def main():
         print(f"Episode {episode} Complete | Avg Loss: {total_loss/len(episode_buffer):.4f}")
 
         # Saving Logic
-        if episode > 0 and episode % 10 == 0:
+        if episode > 0 and episode % 50 == 0:
             if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR, exist_ok=True)
             print("Saving checkpoint...")
             base_model.save_pretrained(OUTPUT_DIR)

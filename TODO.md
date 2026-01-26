@@ -1,9 +1,13 @@
-Phase 1:
-- Decompose doesn't work right, let's fix it and add DEC_LLM too
-- Move from the priority queue-tree search to a prompting/distillation from Llama
+Right now search.py is super broken
+We need the actual logic in workers or actions.py
+In fact I think a lot of the logic in search.py needs to be moved there
 
-Phase 2:
-- Set up training pipeline for supervised reinforcment learning
+Semantic rename of instuctions is probably a good idea too
 
-Phase 3:
-- Set up training pipeline
+Choose the next action:
+- SEARCH: Search for keywords (Entities, Names)
+- ANSWER: Final answer generation
+...
+Format:
+Action: SEARCH
+Input: obama height

@@ -1,116 +1,197 @@
-from typing import Tuple, List, Optional
-import re
-from src.env.state import GreenState
-from src.agent import actions, workers
+from typing import Optional, Tuple, Dict, Any
 
-# We need a protocol for Retriever or import EphemeralRetriever, but let's assume it's passed in.
-# For typing, we can just use Any or specific type if accessible.
+from src.env import state
+import copy
+import json
+from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
+from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever
 
-def execute_action(state: GreenState, action_id: int, argument: str, retriever: EphemeralRetriever) -> Tuple[str, bool]:
-    """
-    Game Engine: Executes the action and transitions the state.
-    Returns: (Observation, Done)
-    """
-    obs = ""
-    done = False
-    
-    # --- 1. ANSWERING (GEN_SLM / GEN_LLM) ---
-    if action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
-        use_llm = (action_id == actions.ACTION_GEN_LLM)
-        # In a real run, workers.generate_answer uses the state. 
-        # But wait, workers.generate_answer usually *generates* the text.
-        # If the RL agent output the argument "The answer is 42", then that IS the answer.
-        # But if the action is "Generate Answer" and argument is "Thinking...", 
-        # then we call the worker.
-        #
-        # DECISION: In PPO, the Policy *IS* the worker. 
-        # If Action=Answer, the argument IS the answer.
-        # We don't call a separate worker to generate the answer again.
-        obs = argument
-        done = True 
+# Get the cost table
+try:
+    with open("data/meta/cost_table.json", "r") as f:
+        COST_TABLE = json.load(f)
+except FileNotFoundError:
+    print("Warning: cost_table.json not found. Using default costs (1.0).")
+    COST_TABLE = {}
 
-    # --- 2. RETRIEVAL (RET_KEY / RET_VEC) ---
-    elif action_id in [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]:
-        clean_query = argument.strip()
-        # Fallback for empty query
-        if len(clean_query) < 5 and state['subqueries']:
-            clean_query = state['subqueries'][-1]['question']
-            
-        results = []
-        if action_id == actions.ACTION_RET_KEY:
-            results = retriever.search_bm25(clean_query, k=3)
-        else:
-            results = retriever.search_dense(clean_query, k=3)
-            
-        obs = f"Found {len(results)} docs."
+# A class to encapsulate the engine logic and manage the state
+class GreenEngine:
+    def __init__(self, retriever: EphemeralRetriever):
+        self.retriever = retriever
+    
+    def get_cost(self, action_id: int) -> float:
+        return COST_TABLE.get(str(action_id), 1.0)
+    
+    def step(self, state: GreenState, action_id: int, argument: Optional[str] = None) -> GreenState:
+        """
+        For our State Machine
+        This function constitutes the universal transiation function:
+        S' = T(S, A)
         
+        Args:
+            state (GreenState): Current state of the agent.
+            action_id (int): The action to perform.
+            argument (Optional[str]): Additional argument for the action.
+        
+        Returns:
+            new_state (GreenState): The updated state after action execution.
+        """
+        # Deep copy the state to avoid mutating the original
+        new_state = copy.deepcopy(state)
+
+        # Identify which subquery that will be influenced by actions the operate on subqueries
+        active_subquery = get_active_subquery(new_state)
+
+        # Execute the action using the engine function
+        observation = ""
+        final_argument = argument or ""
+
+        # --- [0] or [1]: ANSWERING (GEN_SLM / GEN_LLM) ---
+        # Currently this will answer the active SUBQUERY
+        # not necessarily the GLOBAL question
+        # I'm not sure I like this direction but we can change later
+        if action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
+            use_llm = (action_id == actions.ACTION_GEN_LLM)
+            obs = workers.generate_answer(new_state, use_llm=use_llm)
+
+            observation = final_argument
+            if active_subquery:
+                active_subquery['answer'] = final_argument
+                active_subquery['status'] = "ANSWERED"
+                # Check for Global Solved Status
+                if active_subquery['id'] == "1" or active_subquery == new_state['subqueries'][0]:
+                    new_state['status'] = "SOLVED"
+        
+        # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---
+        # This will do for now but I'd like the model to know whether the it's doing
+        # a keyword or vector search
+        elif action_id in [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]:
+            # Execute Search
+            # For now we use an SLM for keyword, LLM for vector
+            # SLM is faster and cheaper for simple keyword generation
+            # LLM is better at semantic understanding
+            if action_id == actions.ACTION_RET_KEY:
+                argument = workers.generate_query_for_keyword_search(new_state, use_llm=False)
+                raw_docs = self.retriever.search_bm25(argument)
+            else:
+                argument = workers.generate_query_for_vector_search(new_state, use_llm=True)
+                raw_docs = self.retriever.search_dense(argument)
+            
+            # Format & Update State
+            formatted_docs = self._format_docs(raw_docs)
+            if active_subquery:
+                active_subquery['documents'].extend(formatted_docs)
+            
+            observation = f"Found {len(formatted_docs)} docs."
+
+        # [4] or [5]: GRADING (GRD_SLM / GRD_LLM)
+        elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
+        # Grade the documents in the active subquery
+        # Not checked, may not work
+            if state['subqueries']:
+                active_sub = state['subqueries'][-1]
+                count_rel = 0
+                
+                # Grade all UNKNOWN docs
+                for doc in active_sub['documents']:
+                    if doc['relevance'] == "UNKNOWN":
+                        use_llm = (action_id == actions.ACTION_GRD_LLM)
+                        grade = workers.generate_grade(state, doc['content'], use_llm=use_llm)
+                        
+                        doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
+                        if grade == "Relevant": count_rel += 1
+
+                relevant_indices = []
+                for i, doc in enumerate(active_sub['documents']):
+                    if doc.get('relevance') == "RELEVANT":
+                        relevant_indices.append(f"Doc {i+1} ({doc['title']})")
+                
+                if relevant_indices:
+                    obs = f"Graded docs. {count_rel} relevant: {', '.join(relevant_indices)}"
+                else:
+                    obs = "Graded docs. None found relevant."
+
+        # [6]: REWRITE (RWT_SLM)
+        elif action_id == actions.ACTION_RWT_SLM:
+            clean_rw = (argument or "").strip()
+            
+            # 2. Identify the target (Safe access)
+            # Assuming you want the last one, or use a helper like _get_active_subquery(state)
+            target_sub = state['subqueries'][-1] if state['subqueries'] else None
+
+            # 3. Execute or Fail
+            if len(clean_rw) > 5 and target_sub:
+                old_q = target_sub['question']
+                target_sub['question'] = clean_rw
+                obs = f"Query updated: '{old_q}' -> '{clean_rw}'"
+            else:
+                obs = "No query rewrite update."
+
+        # [7] or [8]: DECOMPOSITION (DEC_SLM / DEC_LLM)
+        elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
+            plan_text = argument
+            if plan_text is None or len(plan_text) < 10:
+                use_llm = (action_id == actions.ACTION_DEC_LLM)
+                plan_text = workers.generate_plan(state, use_llm=use_llm)
+            
+            # Format the plan into subqueries
+            # Not sure how well this is going to work but we can iterate
+            lines = plan_text.split('\n')
+            new_subs = []
+            if state['subqueries']:
+                parent_id = state['subqueries'][-1]['id']
+                for i, line in enumerate(lines):
+                    clean = line.strip().lstrip('1234567890. ')
+                    if clean:
+                        new_subs.append({
+                            "id": f"{parent_id}.{i+1}",
+                            "question": clean,
+                            "status": "PENDING",
+                            "answer": None,
+                            "documents": []
+                        })
+                    state['subqueries'].extend(new_subs)
+                    task_preview = "\n".join([f"{i+1}. {sub['question']}" for i, sub in enumerate(new_subs)])
+                obs = f"Decomposed into {len(new_subs)} sub-tasks:\n{task_preview}"
+        
+            else:
+                obs = "No active query to decompose."
+        
+        # [9]: FAILURE
+        elif action_id == actions.ACTION_FAIL:
+            obs = "Agent declared failure."
+            done = True
+
+        # --- FALLBACK ---
+        else:
+            obs = "Invalid or No-Op Action."
+
+        # History and Cost Update
+        step_cost = self.get_cost(action_id)
+        new_state['total_joules'] += step_cost
+
+        new_state['history'].append(GreenHistoryItem(
+            action_id=action_id,
+            action_name=actions.get_action_name(action_id),
+            observation=observation,
+            argument=final_argument,
+            cost=step_cost
+        ))
+
+        return new_state
+    
+    # Helper functions    
+    def _format_docs(self, raw_docs: list) -> list:
+        # Logic to splite Title: Content into dicts
         # Update State
         formatted_docs = []
-        for r in results:
+        for r in raw_docs:
             # Retriever returns strings "Title: Content"
             parts = r.split(": ", 1)
             title = parts[0] if len(parts)>1 else "Unknown"
             content = parts[1] if len(parts)>1 else r
             formatted_docs.append({"title": title, "content": content, "relevance": "UNKNOWN"})
-            
-        if state['subqueries']:
-            state['subqueries'][-1]['documents'].extend(formatted_docs)
 
-    # --- 3. GRADING (GRD_SLM) ---
-    elif action_id == actions.ACTION_GRD_SLM:
-        # Grade the documents in the active subquery
-        if state['subqueries']:
-            active_sub = state['subqueries'][-1]
-            count_rel = 0
-            # To be efficient, maybe only grade UNKNOWN ones?
-            for doc in active_sub['documents']:
-                 if doc['relevance'] == "UNKNOWN":
-                     # In PPO, usually we rely on the policy to be the intelligence.
-                     # But here the action is "Call Grader". 
-                     # So we use the worker (environment oracle).
-                     # OR does the policy emit the grade? 
-                     # The prompt implies: "Action: 4 (Grade)" -> Environment runs logic.
-                     grade = workers.generate_grade(state, doc['content'])
-                     doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
-                     if grade == "Relevant": count_rel += 1
-            obs = f"Graded docs. {count_rel} relevant."
-        else:
-            obs = "No documents to grade."
-
-    # --- 4. DECOMPOSITION (DEC_SLM / DEC_LLM) ---
-    elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
-         # Logic: Argument is the plan? Or do we call worker?
-         # If argument is present and detailed, use it.
-         # If argument is just "Decompose", call worker.
-         # For RL, let's allow the model to Output the plan in the Argument.
-         plan_text = argument
-         if len(plan_text) < 10: # Fallback if model was lazy
-             use_llm = (action_id == actions.ACTION_DEC_LLM)
-             plan_text = workers.generate_plan(state, use_llm=use_llm)
-         
-         # Execute Plan Parsing
-         lines = plan_text.split('\n')
-         new_subs = []
-         if state['subqueries']:
-             parent_id = state['subqueries'][-1]['id']
-             for i, line in enumerate(lines):
-                clean = line.strip().lstrip('1234567890. ')
-                if clean:
-                    new_subs.append({
-                        "id": f"{parent_id}.{i+1}",
-                        "question": clean,
-                        "status": "PENDING",
-                        "answer": None,
-                        "documents": []
-                    })
-             state['subqueries'].extend(new_subs)
-             obs = f"Decomposed into {len(new_subs)} sub-tasks."
-         else:
-             obs = "No active query to decompose."
-
-    # --- FALLBACK ---
-    else:
-        obs = "Invalid or No-Op Action."
-
-    return obs, done
+        return formatted_docs
+       

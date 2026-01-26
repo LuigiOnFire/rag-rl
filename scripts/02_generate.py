@@ -49,6 +49,7 @@ def main():
         retriever = EphemeralRetriever(documents=corpus)
         
         # 5. Instantiate Oracle Search
+        # Important! This is where we actually initiate the search to sovle the problem
         oracle_search = OracleSearch(retriever=retriever)
         
         # 6. Setup Oracle Search

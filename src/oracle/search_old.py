@@ -6,7 +6,7 @@ from src.agent import actions, workers
 from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenHistoryItem
 from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
-from src.env.engine import GreenEngine
+from src.env.engine_old import GreenEngine
 
 # Load Cost Table
 try:
@@ -27,7 +27,6 @@ class SearchNode(NamedTuple):
 
 class OracleSearch:
     def __init__(self, retriever: EphemeralRetriever):
-        self.engine = GreenEngine(retriever=retriever)
         self.retriever = retriever
         self.judge = SoftJudge()
 
@@ -116,11 +115,10 @@ class OracleSearch:
 
         while pq:
             cost, _, current_node = heapq.heappop(pq)
-            # MUCH OF THIS FUNCTIONALITY WILL BE MOVED TO engine.py
             current_state = current_node.state
             nodes_expanded += 1
             
-           # Log this step (snapshot summary)
+            # Log this step (snapshot summary)
             step_info = {
                 "step_idx": nodes_expanded,
                 "cost": cost,
@@ -159,12 +157,11 @@ class OracleSearch:
                 continue
 
             valid_actions = self.get_valid_actions(current_state)
-
-            # We will tell the engine to try each action
+            
             for action_id in valid_actions:
                 try:
                     # Deep copy logic for Dict-based state
-                    # new_state = copy.deepcopy(current_state)
+                    new_state = copy.deepcopy(current_state)
                     
                     # 1. Identify Context (Active Subquery)
                     # Get last ACTIVE or PENDING subquery
@@ -184,23 +181,98 @@ class OracleSearch:
                     # Worker needs to see the structured state
                     argument = ""
                     observation = ""
+                    
+                    if action_id in [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]:
+                        query = workers.generate_search_query(new_state)
+                        argument = query
+                        
+                        docs = []
+                        if action_id == actions.ACTION_RET_KEY:
+                            docs_text = self.retriever.search_bm25(query)
+                        else:
+                            assert action_id == actions.ACTION_RET_VEC # should be guranteed by if condition
+                            docs_text = self.retriever.search_dense(query)
+                        
+                        # Populate documents
+                        new_docs: List[Document] = []
+                        for txt in docs_text:
+                            # Parse title if possible? Our retrieval returns plain strings "Title: Content"
+                            parts = txt.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Unknown"
+                            content = parts[1] if len(parts) > 1 else txt
+                            new_docs.append({"title": title, "content": content, "relevance": "UNKNOWN"})
+                        
+                        active_subquery['documents'].extend(new_docs)
+                        observation = f"Found {len(new_docs)} docs."
+                        
+                    elif action_id in [actions.ACTION_GRD_SLM]:
+                         # Grade docs in active_sub
+                         count_rel = 0
+                         for doc in active_subquery['documents']:
+                             if doc['relevance'] == "UNKNOWN":
+                                 grade = workers.generate_grade(new_state, doc['content'])
+                                 doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
+                                 if grade == "Relevant": count_rel += 1
+                         observation = f"Graded docs. {count_rel} relevant."
+                         
+                    elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
+                        # Decompose active subquery
+                        plan_text = workers.generate_plan(new_state, use_llm=(action_id==actions.ACTION_DEC_LLM))
+                        argument = plan_text
+                        
+                        # Parse plan (Naive splitting by newline or number)
+                        lines = plan_text.split('\n')
+                        new_subs = []
+                        for i, line in enumerate(lines):
+                            clean = line.strip().lstrip('1234567890. ')
+                            if clean:
+                                new_subs.append({
+                                    "id": f"{active_subquery['id']}.{i+1}",
+                                    "question": clean,
+                                    "status": "PENDING",
+                                    "answer": None,
+                                    "documents": []
+                                })
+                        
+                        # Append new subqueries to the list (after current? or at end?)
+                        # Strategy: Add them to end, but they are children of active_sub conceptually.
+                        # For flat list processing, appending works.
+                        new_state['subqueries'].extend(new_subs)
+                        observation = f"Decomposed into {len(new_subs)} sub-tasks."
 
-                    # Get the next step from the engine
-                    new_state = self.engine.step(current_state, action_id, argument=None)
+                    elif action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
+                        ans = workers.generate_answer(new_state, use_llm=(action_id==actions.ACTION_GEN_LLM))
+                        argument = ""
+                        observation = ans
+                        
+                        # Update Answer
+                        active_subquery['answer'] = ans
+                        active_subquery['status'] = "ANSWERED"
+                        
+                        # If this was the main query (id 1 or first one), mark state as SOLVED
+                        if active_subquery['id'] == "1" or active_subquery == new_state['subqueries'][0]:
+                            new_state['status'] = "SOLVED"
 
-                    last_step = new_state['history'][-1]
-                    step_cost = last_step['cost']
-
-                    # Create our search node
-                    new_node = SearchNode(
-                        state=new_state,
-                        parent=current_node,
-                        action_item=last_step
-                    )
-
-                    # Push this node to our heap
+                    # Update Metadata
+                    step_cost = get_cost(action_id)
+                    new_state['total_joules'] += step_cost
+                    
+                    # Create Lightweight History Item
+                    history_item: GreenHistoryItem = {
+                        "action_id": action_id,
+                        "action_name": actions.get_action_name(action_id),
+                        "argument": argument,
+                        "observation": observation,
+                        "cost": step_cost
+                    }
+                    new_state['history'].append(history_item)
+                    
+                    # Create New Node
+                    new_node = SearchNode(state=new_state, parent=current_node, action_item=history_item)
+                    
+                    tiebreaker += 1
                     heapq.heappush(pq, (cost + step_cost, tiebreaker, new_node))
-                
+                    
                 except Exception as e:
                     # print(f"Error expanding {action_id}: {e}")
                     continue

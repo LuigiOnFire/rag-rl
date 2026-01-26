@@ -4,6 +4,8 @@ import logging
 import re
 from src.agent.workers import llm_worker
 
+USE_LLM_JUDGE = False
+
 # 1. Setup Logging (Ensures you see output immediately)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -70,7 +72,11 @@ class SoftJudge:
         if f1 > 0.8: # Increased threshold
             logger.info(f"JUDGE: Tier 2 (F1={f1:.2f}) -> PASS")
             return True, f"Tier 2 (F1={f1:.2f})"
-
+        
+        if not USE_LLM_JUDGE:
+            logger.info(f"JUDGE: Tier 2 (F1={f1:.2f}) -> FAIL")
+            return False, f"Tier 2 (F1={f1:.2f})"
+        
         # --- Tier 3: LLM Judge (The Expensive Fallback) ---
         logger.info("JUDGE: Tier 1 & 2 Failed. Escalating to LLM Judge...")
         
