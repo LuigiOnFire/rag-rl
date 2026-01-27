@@ -83,7 +83,7 @@ class GreenRAGEnv(gym.Env):
             if not has_text:
                 # DON'T send a generic instruction.
                 # DO send the original Question.
-                clean_argument = self.state['main_query']
+                clean_argument = self.state['question']
 
         # Sanitization: Remove artifacts if model starts repeating prompt structure
         if "Answer Generation" in clean_argument or "Input:" in clean_argument:

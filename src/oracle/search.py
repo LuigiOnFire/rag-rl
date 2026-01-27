@@ -1,6 +1,7 @@
 import heapq
 import json
 import copy
+import logging
 from typing import List, Optional, Any, Dict, Tuple, TypedDict, NamedTuple
 from src.agent import actions, workers
 from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenHistoryItem
@@ -8,12 +9,15 @@ from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 from src.env.engine import GreenEngine
 
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger().setLevel(logging.DEBUG)
+
 # Load Cost Table
 try:
     with open("data/meta/cost_table.json", "r") as f:
         COST_TABLE = json.load(f)
 except FileNotFoundError:
-    print("Warning: cost_table.json not found. Using default costs (1.0).")
+    logging.warning("cost_table.json not found. Using default costs (1.0).")
     COST_TABLE = {}
 
 def get_cost(action_id):
@@ -75,29 +79,18 @@ class OracleSearch:
 
             return valid
 
-    def solve(self, start_state_params: Any, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
+    def solve(self, start_state_params: Any, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
         # Adaptation for 02_generate.py compatibility
+        logging.debug("Starting OracleSearch.solve()")
         initial_state: GreenState
         
-        if isinstance(start_state_params, dict) and "main_query" in start_state_params:
+        if isinstance(start_state_params, dict) and "question" in start_state_params:
              # It is already a GreenState dict
              # type ignore used because mypy/pylance struggles with deepcopy of TypedDict vs dict
              initial_state = copy.deepcopy(start_state_params) # type: ignore
         else:
-             # Legacy or plain object support
-             question = ""
-             ground_truth = ""             
-             if hasattr(start_state_params, 'question'):
-                 question = getattr(start_state_params, 'question')
-                 ground_truth = getattr(start_state_params, 'ground_truth', "")
-             elif isinstance(start_state_params, dict):
-                 question = start_state_params.get('question', '')
-            
-             initial_state = create_initial_state(question, ground_truth)
-        
-        # Ensure ground_truth variable is bound for the loop
-        ground_truth = initial_state['ground_truth']
-
+            raise ValueError("start_state_params must be a GreenState dict.")
+    
         # Priority Queue: (TotalCost, tiebreaker, SearchNode)
         # We wrap the state in a SearchNode to track the path (parent)
         root_node = SearchNode(state=initial_state, parent=None, action_item=None)
@@ -121,6 +114,7 @@ class OracleSearch:
             nodes_expanded += 1
             
            # Log this step (snapshot summary)
+            logging.debug(f"Step {nodes_expanded}: cost={cost}, history_len={len(current_state['history'])}, last_action={current_state['history'][-1]['action_id'] if current_state['history'] else 'START'}, status={current_state.get('status', 'SOLVING')}")
             step_info = {
                 "step_idx": nodes_expanded,
                 "cost": cost,
@@ -134,24 +128,30 @@ class OracleSearch:
                 continue
 
             # Check Success
+            logging.debug(f"Current state status: {current_state['status']}")
             if current_state['status'] == "SOLVED":
                 # We generated a "SOLVED" state.
-                final_sub = current_state['subqueries'][0]
-                final_answer = final_sub.get('answer') or ""
-                
+                final_answer = current_state.get('answer')
+
+                logging.debug(f"Solved with answer: {final_answer}")                
                 is_correct, reason = self.judge.judge(final_answer, ground_truth)
-                step_info["judge_verdict"] = is_correct
-                step_info["judge_reason"] = reason
+                
+                # judge_verdict = is_correct
+                # judge_reason = reason
                 
                 if is_correct:
-                    if cost < best_cost:
-                        best_cost = cost
-                        solution_node = current_node
-                        # Update the state in the node with judge log
-                        solution_node.state['judge_log'] = reason
-                    continue
+                    # Old Logic would keep looking for cheaper solutions
+                    # if cost < best_cost:
+                    #     best_cost = cost
+                    #     solution_node = current_node
+
+                    # New logic, do not continue searching
+                    # Just take this one and move on 
+                    solution_node = current_node
+                    break
                 else: 
                     # Wrong answer
+                    logging.debug(f"Wrong answer: {final_answer}, Reason: {reason}")
                     continue
             
             if len(current_state['history']) >= max_depth:
@@ -167,18 +167,7 @@ class OracleSearch:
                     # new_state = copy.deepcopy(current_state)
                     
                     # 1. Identify Context (Active Subquery)
-                    # Get last ACTIVE or PENDING subquery
-                    active_subquery = None
-                    for sub in reversed(new_state['subqueries']):
-                        if sub['status'] in ["ACTIVE", "PENDING"]:
-                            active_subquery = sub
-                            break
-                    
-                    if not active_subquery:
-                        # Nothing to work on? Maybe finished?
-                        continue
-                        
-                    active_subquery['status'] = "ACTIVE" # Ensure it's active
+                    # Get last ACTIVE or PENDING subquery                    
 
                     # 2. Generate Argument (Tactics)
                     # Worker needs to see the structured state
@@ -186,10 +175,13 @@ class OracleSearch:
                     observation = ""
 
                     # Get the next step from the engine
+                    logging.debug(f"Expanding action {action_id} from current state.")
                     new_state = self.engine.step(current_state, action_id, argument=None)
 
                     last_step = new_state['history'][-1]
-                    step_cost = last_step['cost']
+                    step_cost = last_step['cost']        
+
+                    tiebreaker += 1           
 
                     # Create our search node
                     new_node = SearchNode(
@@ -202,7 +194,7 @@ class OracleSearch:
                     heapq.heappush(pq, (cost + step_cost, tiebreaker, new_node))
                 
                 except Exception as e:
-                    # print(f"Error expanding {action_id}: {e}")
+                    logging.error(f"Error expanding {action_id}: {e}")
                     continue
 
         # Reconstruct Trajectory from Solution Node
@@ -225,7 +217,7 @@ class OracleSearch:
             # Now build SFT steps: (Pre-State from parent) -> Action
             # path_nodes[0] is Root (Start State, no action leading to it)
             # path_nodes[1] is State 1 (created by Action 1 from State 0)
-            
+            logging.debug(f"Reconstructing SFT trajectory with {len(path_nodes)-1} steps.")
             for i in range(1, len(path_nodes)):
                 node = path_nodes[i]
                 parent = path_nodes[i-1]
@@ -254,5 +246,6 @@ class OracleSearch:
             "trace": search_trace,
             "sft_trajectory": sft_trajectory
         }
+        logging.debug(f"Debug Info: {debug_info}")
         return final_state, debug_info
 

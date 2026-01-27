@@ -1,11 +1,15 @@
+import logging
 from typing import Optional, Tuple, Dict, Any
 
 from src.env import state
 import copy
 import json
-from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
+from src.env.state import GreenState, GreenHistoryItem, get_active_subquery, is_main_query
 from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger().setLevel(logging.DEBUG)
 
 # Get the cost table
 try:
@@ -37,6 +41,7 @@ class GreenEngine:
         Returns:
             new_state (GreenState): The updated state after action execution.
         """
+        logging.debug(f"Engine Step: Action ID {action_id} with argument: {argument}")
         # Deep copy the state to avoid mutating the original
         new_state = copy.deepcopy(state)
 
@@ -44,8 +49,10 @@ class GreenEngine:
         active_subquery = get_active_subquery(new_state)
 
         # Execute the action using the engine function
-        observation = ""
+        obs = ""
         final_argument = argument or ""
+
+        logging.debug(f"Attempting Action ID {action_id} on State with status: {new_state['status']}")
 
         # --- [0] or [1]: ANSWERING (GEN_SLM / GEN_LLM) ---
         # Currently this will answer the active SUBQUERY
@@ -55,12 +62,15 @@ class GreenEngine:
             use_llm = (action_id == actions.ACTION_GEN_LLM)
             obs = workers.generate_answer(new_state, use_llm=use_llm)
 
-            observation = final_argument
+            logging.debug(f"Do we have an active subquery? {'Yes' if active_subquery else 'No'}")
+            logging.debug(f"LLM RESPONDS: {obs}")
             if active_subquery:
-                active_subquery['answer'] = final_argument
-                active_subquery['status'] = "ANSWERED"
                 # Check for Global Solved Status
-                if active_subquery['id'] == "1" or active_subquery == new_state['subqueries'][0]:
+                # If the active subquery is a GreenState instead of a SubQuery,
+                # this object represents the main query
+                # if it's solved, we mark the whole state as SOLVED
+                if is_main_query(active_subquery):
+                    logging.debug("Main query answered, marking state as SOLVED.")
                     new_state['status'] = "SOLVED"
         
         # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---
@@ -83,7 +93,7 @@ class GreenEngine:
             if active_subquery:
                 active_subquery['documents'].extend(formatted_docs)
             
-            observation = f"Found {len(formatted_docs)} docs."
+            obs = f"Found {len(formatted_docs)} docs."
 
         # [4] or [5]: GRADING (GRD_SLM / GRD_LLM)
         elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
@@ -137,22 +147,24 @@ class GreenEngine:
             
             # Format the plan into subqueries
             # Not sure how well this is going to work but we can iterate
+
+            # Previously this would recursively decompose the active subquery
+            # I'm going to change the logic here
+            # Now we always decompose the MAIN query, overwriting any existing subqueries
             lines = plan_text.split('\n')
             new_subs = []
-            if state['subqueries']:
-                parent_id = state['subqueries'][-1]['id']
-                for i, line in enumerate(lines):
-                    clean = line.strip().lstrip('1234567890. ')
-                    if clean:
-                        new_subs.append({
-                            "id": f"{parent_id}.{i+1}",
-                            "question": clean,
-                            "status": "PENDING",
-                            "answer": None,
-                            "documents": []
-                        })
-                    state['subqueries'].extend(new_subs)
-                    task_preview = "\n".join([f"{i+1}. {sub['question']}" for i, sub in enumerate(new_subs)])
+            for i, line in enumerate(lines):
+                clean = line.strip().lstrip('1234567890. ')
+                if clean:
+                    new_subs.append({
+                        "id": f"{i}",
+                        "question": clean,
+                        "status": "PENDING",
+                        "answer": None,
+                        "documents": []
+                    })
+                new_state['subqueries'].extend(new_subs)
+                task_preview = "\n".join([f"{i}. {sub['question']}" for i, sub in enumerate(new_subs)])
                 obs = f"Decomposed into {len(new_subs)} sub-tasks:\n{task_preview}"
         
             else:
@@ -174,7 +186,7 @@ class GreenEngine:
         new_state['history'].append(GreenHistoryItem(
             action_id=action_id,
             action_name=actions.get_action_name(action_id),
-            observation=observation,
+            observation=obs,
             argument=final_argument,
             cost=step_cost
         ))

@@ -22,10 +22,12 @@ class GreenHistoryItem(TypedDict):
 
 class GreenState(TypedDict):
     # 1. High Level
-    main_query: str
-    ground_truth: str  # The reference answer, for checking success during search/training.
+    question: str
+    # ground_truth: str  # The reference answer, for checking success during search/training. This is no lonerg stored in the state, as the agent should not have direct access to it.
     status: Literal["SOLVING", "SOLVED", "FAILED"]
     total_joules: float
+    documents: List[Document]    # The raw search hits
+
 
     # 2. The Brain (Reasoning Traces)
     scratchpad: str  # e.g., "I need to check X because Y failed..."
@@ -38,24 +40,20 @@ class GreenState(TypedDict):
     history: List[GreenHistoryItem]
     
     # 5. Metadata
-    judge_log: Optional[str]
+    # Commented out for now
+    # I don't forsee this being used
+    # judge_log: Optional[str]
 
 def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
     return {
-        "main_query": question,
-        "ground_truth": ground_truth,
+        "question": question,
         "status": "SOLVING",
         "total_joules": 0.0,
         "scratchpad": "Goal: Answer the main query.",
-        "subqueries": [{
-            "id": "1",
-            "question": question,
-            "status": "ACTIVE",
-            "answer": None,
-            "documents": []
-        }],
+        "subqueries": [],
         "history": [],
-        "judge_log": None
+        "documents": [],
+        # "judge_log": None
     }
 
 def get_active_subquery(state: GreenState):
@@ -64,4 +62,9 @@ def get_active_subquery(state: GreenState):
         if sub['status'] in ["ACTIVE", "PENDING"]:
             sub['status'] = "ACTIVE"  # Mark as active
             return sub
-    return state['subqueries'][0] # Fallback
+    
+    # Let's consider the top level state a query
+    return state
+
+def is_main_query(state: Any) -> bool:
+    return "subqueries" in state

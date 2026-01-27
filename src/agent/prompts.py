@@ -1,58 +1,58 @@
 from typing import Any, Dict
 
 def format_state_for_prompt(state: Dict[str, Any]) -> str:
-    """
-    The Single Source of Truth for how the Agent sees the world.
-    Used by:
-      1. Training (dataset.py) - to format history
-      2. Inference (test/live) - to format live state
-    """
-    # 1. Header
-    out = f"Goal: {state.get('main_query', 'Unknown')}\n"
-    out += f"Status: {state.get('status', 'SOLVING')}\n"
-    out += f"Scratchpad: {state.get('scratchpad', '')}\n\n"
-    
-    # 2. History
-    out += "History:\n"
-    history = state.get('history', [])
-    if not history:
-        out += "(None)\n"
-    else:
-        for i, item in enumerate(history):
-            act = item.get('action_name', 'UNKNOWN')
-            obs = item.get('observation', '')
-            # Truncate long observations to save context window
-            if len(str(obs)) > 200:
-                obs = str(obs)[:200] + "... (truncated)"
-            out += f"{i+1}. {act} -> {obs}\n"
-    
-    # 3. Subqueries
-    out += "\nSub-Tasks:\n"
-    subs = state.get('subqueries', [])
-    for sub in subs:
-        status = sub.get('status', 'PENDING')
-        q = sub.get('question', '')
-        ans = sub.get('answer')
-        docs = len(sub.get('documents', []))
-        
-        # STRICT FORMAT: "[STATUS] Question" (No bullets!)
-        line = f"[{status}] {q}"
-        if ans: line += f" (Ans: {ans})"
-        if docs > 0: line += f" [Docs: {docs}]"
-        out += line + "\n"
+   """
+   The Single Source of Truth for how the Agent sees the world.
+   Used by:
+   1. Training (dataset.py) - to format history
+   2. Inference (test/live) - to format live state
+   """
+   # 1. Header
+   out = f"Goal: {state.get('question', 'Unknown')}\n"
+   out += f"Status: {state.get('status', 'SOLVING')}\n"
+   out += f"Scratchpad: {state.get('scratchpad', '')}\n\n"
 
-        # 0: "GEN_SLM",
-        # 1: "GEN_LLM",
-        # 2: "RET_KEY",
-        # 3: "RET_VEC",
-        # 4: "GRD_SLM",
-        # 5: "GRD_LLM",
-        # 6: "RWT_SLM",
-        # 7: "DEC_SLM",
-        # 8: "DEC_LLM",
-        # 9: "FAIL"
+   # 2. History
+   out += "History:\n"
+   history = state.get('history', [])
+   if not history:
+      out += "(None)\n"
+   else:
+      for i, item in enumerate(history):
+         act = item.get('action_name', 'UNKNOWN')
+         obs = item.get('observation', '')
+         # Truncate long observations to save context window
+         if len(str(obs)) > 200:
+               obs = str(obs)[:200] + "... (truncated)"
+         out += f"{i+1}. {act} -> {obs}\n"
 
-        out += """
+   # 3. Subqueries
+   out += "\nSub-Tasks:\n"
+   subs = state.get('subqueries', [])
+   for sub in subs:
+      status = sub.get('status', 'PENDING')
+      q = sub.get('question', '')
+      ans = sub.get('answer')
+      docs = len(sub.get('documents', []))
+      
+      # STRICT FORMAT: "[STATUS] Question" (No bullets!)
+      line = f"[{status}] {q}"
+      if ans: line += f" (Ans: {ans})"
+      if docs > 0: line += f" [Docs: {docs}]"
+      out += line + "\n"
+
+      # 0: "GEN_SLM",
+      # 1: "GEN_LLM",
+      # 2: "RET_KEY",
+      # 3: "RET_VEC",
+      # 4: "GRD_SLM",
+      # 5: "GRD_LLM",
+      # 6: "RWT_SLM",
+      # 7: "DEC_SLM",
+      # 8: "DEC_LLM",
+      # 9: "FAIL"
+
+   out += """
 AVAILABLE ACTIONS:
 Type only the corresponding action ID (0-9) and provide the required input as specified.
 ------------------
@@ -96,5 +96,5 @@ Type only the corresponding action ID (0-9) and provide the required input as sp
    - Input: A single, simple sub-question.
 ------------------
 """
-        print("Added action instructions to prompt.")
-        return out
+   print("Added action instructions to prompt.")
+   return out

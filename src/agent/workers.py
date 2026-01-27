@@ -2,6 +2,13 @@ import ollama
 from typing import List, TypedDict, Any
 from src.env.state import GreenState, get_active_subquery
 from src.env.retriever import EphemeralRetriever
+import logging
+import os
+
+# Intialize a "Null" logger at first
+# The handler will be set later by a higher level module
+trace_logger = logging.getLogger("LLM_TRACE")
+trace_logger.addHandler(logging.NullHandler())
 
 # Models
 MODEL_SLM = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest"
@@ -19,12 +26,50 @@ class LLMWorker:
         
         try:
             response = ollama.chat(model=self.model_name, messages=messages)
-            return response['message']['content']
+            response_text = response['message']['content']
+            # Log the interaction
+            # We capture exactly what went in and what came out
+            log_entry = (                
+                f"MODEL: {self.model_name}\n"
+                f" === INPUT (What LLM saw) === \n"
+                f" {system}\n{prompt}\n"
+                f" === OUTPUT (What LLM replied) === \n"
+                f"{response_text}" 
+            )
+            trace_logger.debug(log_entry)
+
+            return response_text
         except Exception as e:
-            return f"Worker Error: {str(e)}"
+            error_msg = f"Worker Error: {str(e)}"
+            trace_logger.error(f"MODEL: {self.model_name}\nERROR: {error_msg}")
+            return error_msg
 
 slm_worker = LLMWorker(MODEL_SLM)
 llm_worker = LLMWorker(MODEL_LLM)
+
+# --- LOGGING UTILITY ---
+def configure_worker_logging(log_path: str):
+    """
+    This function is called from the top level script (e.g. 02_trajectory.py)
+    to direct LLM input/output logs to a specific file.
+    """
+    trace_logger.setLevel(logging.DEBUG)
+
+    # Clear existing handlers to prevent duplicate logs
+    if trace_logger.hasHandlers():
+        trace_logger.handlers.clear()
+    
+    # Making the directory should be handled by the top level function that made the path
+
+    # Create the specific file handler
+    file_handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')    
+    file_handler.setFormatter(formatter)
+
+
+    trace_logger.addHandler(file_handler)
+    print(f" LLM Trace Logging intialized at: {log_path}")
+
 
 # --- CORE SKILLS (Director Delegates These) ---
 def generate_answer(state: GreenState, use_llm: bool = False) -> str:
@@ -50,8 +95,8 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
         context_str = "No external documents found. Rely on internal knowledge."
 
     # Check the documents
-    print(f" Worker context length: {len(context_str)} characters.")
-    print(f" Worker context preview:\n{context_str[:500]}...\n")
+    # print(f" Worker context length: {len(context_str)} characters.")
+    # print(f" Worker context preview:\n{context_str[:500]}...\n")
 
     # 2. Prompt
     prompt = f"""
@@ -149,13 +194,13 @@ def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     
     # 1. Contextual Prompt
     history_str = _format_history(state['history'])
-    main_query = state['main_query']
+    question = state['question']
     
     prompt = f"""
     Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
     Constraint: Return ONLY the numbered list. No intro, no filler.
     
-    Main Question: "{main_query}"
+    Main Question: "{question}"
     
     Context (What we've done so far):
     {history_str}

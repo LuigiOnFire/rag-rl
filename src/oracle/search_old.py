@@ -78,7 +78,7 @@ class OracleSearch:
         # Adaptation for 02_generate.py compatibility
         initial_state: GreenState
         
-        if isinstance(start_state_params, dict) and "main_query" in start_state_params:
+        if isinstance(start_state_params, dict) and "question" in start_state_params:
              # It is already a GreenState dict
              # type ignore used because mypy/pylance struggles with deepcopy of TypedDict vs dict
              initial_state = copy.deepcopy(start_state_params) # type: ignore

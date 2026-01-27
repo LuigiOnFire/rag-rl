@@ -1,4 +1,4 @@
-# Green-DeepRAG
+# CostAware-RAG
 
 **Goal:** Create a local, energy-efficient RAG (Retrieval-Augmented Generation) agent that learns to minimize Joules per correct answer.
 
@@ -91,7 +91,7 @@ python scripts/02_generate.py
 The project separates logic (`src`) from execution (`scripts`) and artifacts (`data`).
 
 ```
-green-deeprag/
+cost-aware-rag/
 ├── data/                       # ARTIFACTS
 │   ├── meta/cost_table.json    # Energy Prices
 │   └── trajectories/           # Training Data (Output)

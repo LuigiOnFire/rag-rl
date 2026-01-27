@@ -7,6 +7,7 @@ import logging
 # Add project root to sys.path
 sys.path.append(os.getcwd())
 
+from src.agent import workers
 from src.env.state import GreenState, create_initial_state
 from src.env.retriever import EphemeralRetriever
 from src.oracle.search import OracleSearch
@@ -14,15 +15,18 @@ from src.data.hotpot import HotpotQAStreamer
 
 def main():
     # Initialize Logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logging.getLogger().setLevel(logging.INFO)
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.getLogger().setLevel(logging.DEBUG)
     print("Starting Oracle Generation...")
 
     # Create Run Directory
     run_id = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = f"data/runs/run_{run_id}"
+    run_dir = f"data/trajectories/run_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
     print(f"Run Directory: {run_dir}")
+
+    log_file = os.path.join(run_dir, "llm_trace.log")
+    workers.configure_worker_logging(log_file)
     
     # Gold Output File
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
@@ -35,7 +39,7 @@ def main():
     
     # 3. Process Stream
     count = 0
-    streamer = HotpotQAStreamer(limit=50) # Start small
+    streamer = HotpotQAStreamer(limit=1) # Start small
     for sample in streamer.stream():
         # Setup Retriever
         # ... run search ...    
@@ -51,13 +55,15 @@ def main():
         # 5. Instantiate Oracle Search
         # Important! This is where we actually initiate the search to sovle the problem
         oracle_search = OracleSearch(retriever=retriever)
-        
+        logging.info("Initialized Oracle Search.")        
         # 6. Setup Oracle Search
         start_state = create_initial_state(question)
-        start_state['ground_truth'] = ground_truth
         
+
         # Run Search
-        solution_state, debug_info = oracle_search.solve(start_state)
+        logging.info("Starting Oracle Search...")
+        solution_state, debug_info = oracle_search.solve(start_state, ground_truth)
+        logging.info("Oracle Search complete.")
         
         # 7. Write Per-Question Debug Log
         debug_path = f"{run_dir}/q_{count}.json"
