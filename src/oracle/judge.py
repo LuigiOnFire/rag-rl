@@ -2,9 +2,12 @@ import string
 import collections
 import logging
 import re
+from difflib import SequenceMatcher
+
 from src.agent.workers import llm_worker
 
-USE_LLM_JUDGE = False
+
+USE_LLM_JUDGE = True
 
 # 1. Setup Logging (Ensures you see output immediately)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,6 +42,10 @@ def f1_score(prediction, ground_truth):
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
 
+def similarity_score(a, b):
+    """Returns value between 0 and 1 indicating similarity."""
+    return SequenceMatcher(None, a, b).ratio()
+
 class SoftJudge:
     def __init__(self):
         self.refusal_phrases = [
@@ -47,13 +54,15 @@ class SoftJudge:
             "none", "null", "no answer"
         ]
 
-    def judge(self, prediction: str, ground_truth: str) -> tuple[bool, str]:
+    def judge(self, prediction: str, ground_truth: str, question: str) -> tuple[bool, str]:
         norm_pred = normalize_answer(prediction)
         norm_gt = normalize_answer(ground_truth)
+        norm_q = normalize_answer(question)
         
+        logger.info(f"JUDGE: Question='{norm_q}'")
         logger.info(f"JUDGE: GT='{norm_gt}' | PRED='{norm_pred}'")
 
-        # --- Sanity Check: Reject Refusals ---
+        # --- REJECT REFUSALS ---
         if not norm_pred or any(phrase in norm_pred for phrase in self.refusal_phrases):
             logger.warning("JUDGE: Detected Refusal/Empty Answer -> FAIL")
             return False, "Refusal"

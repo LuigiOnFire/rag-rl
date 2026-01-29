@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Dict, Any
 from src.env import state
 import copy
 import json
-from src.env.state import GreenState, GreenHistoryItem, get_active_subquery, is_main_query
+from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
 from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever
 
@@ -49,30 +49,35 @@ class GreenEngine:
         active_subquery = get_active_subquery(new_state)
 
         # Execute the action using the engine function
+        # We don't use the obs or argument for generation
         obs = ""
-        final_argument = argument or ""
+        final_argument = ""
 
         logging.debug(f"Attempting Action ID {action_id} on State with status: {new_state['status']}")
 
         # --- [0] or [1]: ANSWERING (GEN_SLM / GEN_LLM) ---
-        # Currently this will answer the active SUBQUERY
-        # not necessarily the GLOBAL question
-        # I'm not sure I like this direction but we can change later
         if action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
             use_llm = (action_id == actions.ACTION_GEN_LLM)
-            obs = workers.generate_answer(new_state, use_llm=use_llm)
 
-            logging.debug(f"Do we have an active subquery? {'Yes' if active_subquery else 'No'}")
-            logging.debug(f"LLM RESPONDS: {obs}")
+            # Hold on, doesn't this depend on whether or not we have a subquery too? We need to know what to pass here.
+            # This function will figure out what the active query is on its own
+            answer = workers.generate_answer(new_state, use_llm=use_llm)
+
+            logging.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
+            logging.debug(f"LLM RESPONDS: {answer}")
+
+            # If we have an active subquery, we update that
             if active_subquery:
-                # Check for Global Solved Status
-                # If the active subquery is a GreenState instead of a SubQuery,
-                # this object represents the main query
-                # if it's solved, we mark the whole state as SOLVED
-                if is_main_query(active_subquery):
-                    logging.debug("Main query answered, marking state as SOLVED.")
-                    new_state['status'] = "SOLVED"
-        
+                active_subquery['answer'] = answer
+                active_subquery['status'] = "ANSWERED"
+                obs = f"Sub-query answered: {answer}"
+            else:
+                # Otherwise we update the main query
+                new_state['answer'] = answer
+                new_state['status'] = "SOLVED"
+                obs = f"Main query answered: {answer}"
+
+            
         # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---
         # This will do for now but I'd like the model to know whether the it's doing
         # a keyword or vector search
@@ -90,8 +95,10 @@ class GreenEngine:
             
             # Format & Update State
             formatted_docs = self._format_docs(raw_docs)
-            if active_subquery:
+            if active_subquery is not None:
                 active_subquery['documents'].extend(formatted_docs)
+            else:
+                new_state['documents'].extend(formatted_docs)
             
             obs = f"Found {len(formatted_docs)} docs."
 
@@ -99,44 +106,33 @@ class GreenEngine:
         elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
         # Grade the documents in the active subquery
         # Not checked, may not work
-            if state['subqueries']:
-                active_sub = state['subqueries'][-1]
-                count_rel = 0
-                
-                # Grade all UNKNOWN docs
-                for doc in active_sub['documents']:
-                    if doc['relevance'] == "UNKNOWN":
+            if active_subquery is not None:
+                logging.debug(f"Grading documents for active subquery: {active_subquery['question']}")
+                for doc in active_subquery['documents']:
                         use_llm = (action_id == actions.ACTION_GRD_LLM)
-                        grade = workers.generate_grade(state, doc['content'], use_llm=use_llm)
-                        
+                        grade = workers.generate_grade(state, doc['content'], use_llm=use_llm)                        
                         doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
                         if grade == "Relevant": count_rel += 1
 
                 relevant_indices = []
-                for i, doc in enumerate(active_sub['documents']):
+                for i, doc in enumerate(active_subquery['documents']):
                     if doc.get('relevance') == "RELEVANT":
                         relevant_indices.append(f"Doc {i+1} ({doc['title']})")
-                
+                        
                 if relevant_indices:
                     obs = f"Graded docs. {count_rel} relevant: {', '.join(relevant_indices)}"
                 else:
                     obs = "Graded docs. None found relevant."
 
         # [6]: REWRITE (RWT_SLM)
-        elif action_id == actions.ACTION_RWT_SLM:
-            clean_rw = (argument or "").strip()
-            
-            # 2. Identify the target (Safe access)
-            # Assuming you want the last one, or use a helper like _get_active_subquery(state)
-            target_sub = state['subqueries'][-1] if state['subqueries'] else None
+        elif action_id == actions.ACTION_RWT_SLM:           
+            active_subquery = get_active_subquery(new_state)
 
-            # 3. Execute or Fail
-            if len(clean_rw) > 5 and target_sub:
-                old_q = target_sub['question']
-                target_sub['question'] = clean_rw
-                obs = f"Query updated: '{old_q}' -> '{clean_rw}'"
+            if active_subquery is not None:
+                active_subquery["answer"] = workers.generate_rewrite(new_state)
+                obs = f"Rewrote sub-query answer to: {active_subquery['answer']}"
             else:
-                obs = "No query rewrite update."
+                obs = "No active sub-query to rewrite."
 
         # [7] or [8]: DECOMPOSITION (DEC_SLM / DEC_LLM)
         elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
@@ -191,6 +187,7 @@ class GreenEngine:
             cost=step_cost
         ))
 
+        logging.debug(f"Before Step End: New State status: {new_state['status']}, action: {action_id}, observation: {obs}")
         return new_state
     
     # Helper functions    

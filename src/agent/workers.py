@@ -76,14 +76,29 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     """
     Action 0/1: Synthesize facts into an answer.
     """
-    active_sub = get_active_subquery(state)
     worker = llm_worker if use_llm else slm_worker
+
+    # Determine the active query by using the ID
+    active_sub_query = get_active_subquery(state)
+    if active_sub_query is None:
+        query = state['question']
+    else:
+        query = active_sub_query['question']
     
     # 1. Gather Context
     context_str = ""
     found_docs = False
     
     # We look at all subqueries to build a "Knowledge Base" for the answer
+
+    # First get top level docs
+    for doc in state['documents']:
+        # Leniency: Include UNKNOWN docs if we haven't graded them yet
+        if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
+            context_str += f"- {doc['content']}\n"
+            found_docs = True
+
+    # Then get subquery docs
     for sub in state['subqueries']:
         for doc in sub['documents']:
             # Leniency: Include UNKNOWN docs if we haven't graded them yet
@@ -100,7 +115,7 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 
     # 2. Prompt
     prompt = f"""
-    Question: {active_sub['question']}
+    Question: {query}
     
     Gathered Facts:
     {context_str}
@@ -117,6 +132,11 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
     Does NOT connect to any database.
     """
     active_sub = get_active_subquery(state)
+
+    if active_sub is not None:
+        active_query = active_sub['question']
+    else:
+        active_query = state['question']
     if use_llm:
         worker = llm_worker
     else:
@@ -124,7 +144,7 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
     
     prompt = f"""
     Task: Create a concise search query to find information relevant to the Question.
-    Question: "{active_sub['question']}"
+    Question: "{active_query}"
     
     Constraint: Keep it under 10 words. Focus on key terms.
     
@@ -139,6 +159,10 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     Does NOT connect to any database.
     """
     active_sub = get_active_subquery(state)
+    if active_sub is not None:
+        active_query = active_sub['question']
+    else:
+        active_query = state['question']
     if use_llm:
         worker = llm_worker
     else:
@@ -146,7 +170,7 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     
     prompt = f"""
     Task: Create a concise search query to find information relevant to the Question.
-    Question: "{active_sub['question']}"
+    Question: "{active_query}"
     
     Constraint: Keep it under 10 words. Focus on key terms.
     
@@ -160,11 +184,17 @@ def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> s
     Action 4/5: The Director says 'Check this doc', the Worker reads it.
     """
     active_sub = get_active_subquery(state)
+
+    if active_sub is not None:
+        active_query = active_sub['question']
+    else:
+        active_query = state['question']
+
     worker = llm_worker if use_llm else slm_worker
     
     prompt = f"""
     Task: Check if the Document contains information relevant to the Question.
-    Question: "{active_sub['question']}"
+    Question: "{active_query}"
     
     Document:
     "{doc_text[:2000]}" ... (truncated)
@@ -174,6 +204,20 @@ def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> s
     
     result = worker.generate(prompt).strip().lower()
     return "Relevant" if "relevant" in result else "Irrelevant"
+
+def generate_rewrite(state: GreenState) -> str:
+    # Not strictly used in new flow as described, but good to keep hook.
+    active_sub = get_active_subquery(state)
+
+    if active_sub is None:
+        return ""
+
+    prompt = f"""
+    Refine this query: {active_sub['question']}
+    Based on recent history: {state['history'][-3:]}
+    Output ONLY the rewritten query.
+    """
+    return slm_worker.generate(prompt).strip()
 
 def _format_history(history: List[Any]) -> str:
     """Formats the conversation history for the worker context."""

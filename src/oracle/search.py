@@ -108,6 +108,8 @@ class OracleSearch:
         nodes_expanded = 0
 
         while pq:
+            logging.debug("RESTARTING LOOP: WE SHOULD SEE MANY NODES EXPANDED")
+            logging.debug(f"Priority Queue Size: {len(pq)}")
             cost, _, current_node = heapq.heappop(pq)
             # MUCH OF THIS FUNCTIONALITY WILL BE MOVED TO engine.py
             current_state = current_node.state
@@ -131,8 +133,14 @@ class OracleSearch:
             logging.debug(f"Current state status: {current_state['status']}")
             if current_state['status'] == "SOLVED":
                 # We generated a "SOLVED" state.
+                logging.debug("Entering SOLVED state evaluation.")
                 final_answer = current_state.get('answer')
 
+                if final_answer is None:
+                    logging.debug("No final answer found in SOLVED state; continuing search.")
+                    continue
+
+                logging.debug(f"Final answer to judge: {final_answer}")
                 logging.debug(f"Solved with answer: {final_answer}")                
                 is_correct, reason = self.judge.judge(final_answer, ground_truth)
                 

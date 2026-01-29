@@ -6,7 +6,7 @@ class Document(TypedDict):
     relevance: Literal["UNKNOWN", "RELEVANT", "IRRELEVANT"]
 
 class SubQuery(TypedDict):
-    id: str
+    id: int
     question: str
     status: Literal["PENDING", "ACTIVE", "ANSWERED", "FAILED"]
     answer: Optional[str]        # The extracted fact (e.g., "Shirley Temple")
@@ -27,6 +27,7 @@ class GreenState(TypedDict):
     status: Literal["SOLVING", "SOLVED", "FAILED"]
     total_joules: float
     documents: List[Document]    # The raw search hits
+    answer: Optional[str]        # The final answer, once solved
 
 
     # 2. The Brain (Reasoning Traces)
@@ -53,6 +54,7 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
         "subqueries": [],
         "history": [],
         "documents": [],
+        "answer": None,
         # "judge_log": None
     }
 
@@ -63,8 +65,5 @@ def get_active_subquery(state: GreenState):
             sub['status'] = "ACTIVE"  # Mark as active
             return sub
     
-    # Let's consider the top level state a query
-    return state
-
-def is_main_query(state: Any) -> bool:
-    return "subqueries" in state
+    # If there are no subqueries, return None
+    return None
