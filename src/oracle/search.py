@@ -12,6 +12,9 @@ from src.env.engine import GreenEngine
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger().setLevel(logging.DEBUG)
 
+trace_logger = logging.getLogger("LLM_TRACE")
+trace_logger.addHandler(logging.NullHandler())
+
 # Load Cost Table
 try:
     with open("data/meta/cost_table.json", "r") as f:
@@ -135,6 +138,7 @@ class OracleSearch:
                 # We generated a "SOLVED" state.
                 logging.debug("Entering SOLVED state evaluation.")
                 final_answer = current_state.get('answer')
+                question  = current_state.get('question')
 
                 if final_answer is None:
                     logging.debug("No final answer found in SOLVED state; continuing search.")
@@ -142,7 +146,10 @@ class OracleSearch:
 
                 logging.debug(f"Final answer to judge: {final_answer}")
                 logging.debug(f"Solved with answer: {final_answer}")                
-                is_correct, reason = self.judge.judge(final_answer, ground_truth)
+                is_correct, reason = self.judge.judge(final_answer, ground_truth, question)
+
+                trace_logger.debug(f"JUDGE LOG -- Q: {question} | A: {final_answer} | GT: {ground_truth} | Correct: {is_correct} | Reason: {reason}")
+
                 
                 # judge_verdict = is_correct
                 # judge_reason = reason

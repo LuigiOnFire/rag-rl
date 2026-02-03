@@ -136,10 +136,8 @@ class GreenEngine:
 
         # [7] or [8]: DECOMPOSITION (DEC_SLM / DEC_LLM)
         elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
-            plan_text = argument
-            if plan_text is None or len(plan_text) < 10:
-                use_llm = (action_id == actions.ACTION_DEC_LLM)
-                plan_text = workers.generate_plan(state, use_llm=use_llm)
+            use_llm = (action_id == actions.ACTION_DEC_LLM)
+            plan_text = workers.generate_plan(state, use_llm=use_llm)
             
             # Format the plan into subqueries
             # Not sure how well this is going to work but we can iterate
@@ -149,6 +147,7 @@ class GreenEngine:
             # Now we always decompose the MAIN query, overwriting any existing subqueries
             lines = plan_text.split('\n')
             new_subs = []
+
             for i, line in enumerate(lines):
                 clean = line.strip().lstrip('1234567890. ')
                 if clean:
@@ -159,13 +158,11 @@ class GreenEngine:
                         "answer": None,
                         "documents": []
                     })
-                new_state['subqueries'].extend(new_subs)
-                task_preview = "\n".join([f"{i}. {sub['question']}" for i, sub in enumerate(new_subs)])
-                obs = f"Decomposed into {len(new_subs)} sub-tasks:\n{task_preview}"
-        
-            else:
-                obs = "No active query to decompose."
-        
+
+            new_state['subqueries'] = list(reversed(new_subs))            
+            task_preview = "\n".join([f"{i}. {sub['question']}" for i, sub in enumerate(new_subs)])
+            obs = f"Decomposed into {len(new_subs)} sub-tasks:\n{task_preview}"
+                
         # [9]: FAILURE
         elif action_id == actions.ACTION_FAIL:
             obs = "Agent declared failure."

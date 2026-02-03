@@ -137,19 +137,38 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
         active_query = active_sub['question']
     else:
         active_query = state['question']
+
+    known_info = None
+    if "documents" in active_query and active_sub is not None:
+        known_info = "\n".join([f"- {d['title']} : {d['content'][:100]}..." for d in active_sub['documents']])
+
     if use_llm:
         worker = llm_worker
     else:
         worker = slm_worker
-    
-    prompt = f"""
-    Task: Create a concise search query to find information relevant to the Question.
-    Question: "{active_query}"
-    
-    Constraint: Keep it under 10 words. Focus on key terms.
-    
-    Search Query:
-    """
+
+    if known_info is None:
+        prompt = f"""
+        Task: Create a concise search query to find information relevant to the Question.
+        Question: "{active_query}"
+        
+        Constraint: Keep it under 10 words. Focus on key terms.
+        
+        Search Query:
+        """
+        
+    else:
+        prompt = f"""
+        Task: Create a concise search query to find information relevant to the Question.
+        Question: "{active_query}"
+        
+        We have already found these pages:
+        {known_info}
+
+        Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
+        
+        Search Query:
+        """
     
     return worker.generate(prompt).strip()
 
@@ -159,20 +178,40 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     Does NOT connect to any database.
     """
     active_sub = get_active_subquery(state)
+
     if active_sub is not None:
         active_query = active_sub['question']
     else:
         active_query = state['question']
+
+    known_info = None
+    if "documents" in active_query and active_sub is not None:
+        known_info = "\n".join([f"- {d['title']} : {d['content'][:100]}..." for d in active_sub['documents']])
+
     if use_llm:
         worker = llm_worker
     else:
         worker = slm_worker
-    
-    prompt = f"""
-    Task: Create a concise search query to find information relevant to the Question.
+
+    if known_info is None:
+        prompt = f"""
+    Task: Create a query for a vector search to find information relevant to the Question.
     Question: "{active_query}"
     
     Constraint: Keep it under 10 words. Focus on key terms.
+    
+    Search Query:
+    """
+        
+    else:
+        prompt = f"""
+    Task: Create a query for a vector search to find information relevant to the Question.
+    Question: "{active_query}"
+    
+    We have already found these pages:
+    {known_info}
+
+    Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
     
     Search Query:
     """
@@ -236,19 +275,37 @@ def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     """
     worker = llm_worker if use_llm else slm_worker
     
-    # 1. Contextual Prompt
-    history_str = _format_history(state['history'])
     question = state['question']
+    
+    # 1. Gather Context
+    context_str = ""
+    found_docs = False
+
+    # First get top level docs
+    for doc in state['documents']:
+        # Leniency: Include UNKNOWN docs if we haven't graded them yet
+        if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
+            context_str += f"- {doc['content']}\n"
+            found_docs = True
+
+    # Then get subquery docs
+    for sub in state['subqueries']:
+        for doc in sub['documents']:
+            # Leniency: Include UNKNOWN docs if we haven't graded them yet
+            if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
+                context_str += f"- {doc['content']}\n"
+                found_docs = True
+    
+    if not found_docs:
+        context_str = "No external documents found. Rely on internal knowledge."
+
     
     prompt = f"""
     Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
     Constraint: Return ONLY the numbered list. No intro, no filler.
     
     Main Question: "{question}"
-    
-    Context (What we've done so far):
-    {history_str}
-    
+        
     Plan:
     """
     

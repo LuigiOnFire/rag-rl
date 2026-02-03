@@ -24,39 +24,40 @@ def main():
     run_dir = f"data/trajectories/run_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
     print(f"Run Directory: {run_dir}")
-
-    log_file = os.path.join(run_dir, "llm_trace.log")
-    workers.configure_worker_logging(log_file)
     
     # Gold Output File
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
     
-    # 1. Initialize Streamer
+    # Initialize Streamer
     streamer = HotpotQAStreamer()
     
-    # 2. Results Container
+    # Results Container
     # trajectories = [] # Removed in favor of continuous file writing
     
-    # 3. Process Stream
+    # Process Stream
     count = 0
-    streamer = HotpotQAStreamer(limit=1) # Start small
+    streamer = HotpotQAStreamer(limit=50) # Start small
     for sample in streamer.stream():
         # Setup Retriever
         # ... run search ...    
         question = sample['question']
         ground_truth = sample['answer']
+    
+        log_file = f"{run_dir}/q_{count}.log"
+        workers.configure_worker_logging(log_file)
+
         
         print(f"\n[{count+1}] Processing: {question}")
         
-        # # 4. Instantiate Ephemeral Retriever with specific corpus
+        # Instantiate Ephemeral Retriever with specific corpus
         corpus = sample["corpus"]
         retriever = EphemeralRetriever(documents=corpus)
         
-        # 5. Instantiate Oracle Search
+        # Instantiate Oracle Search
         # Important! This is where we actually initiate the search to sovle the problem
         oracle_search = OracleSearch(retriever=retriever)
         logging.info("Initialized Oracle Search.")        
-        # 6. Setup Oracle Search
+        # Setup Oracle Search
         start_state = create_initial_state(question)
         
 
@@ -64,18 +65,8 @@ def main():
         logging.info("Starting Oracle Search...")
         solution_state, debug_info = oracle_search.solve(start_state, ground_truth)
         logging.info("Oracle Search complete.")
-        
-        # 7. Write Per-Question Debug Log
-        debug_path = f"{run_dir}/q_{count}.json"
-        with open(debug_path, "w") as f_debug:
-            json.dump({
-                "question": question,
-                "ground_truth": ground_truth,
-                "solution_found": solution_state is not None,
-                "debug_info": debug_info
-            }, f_debug, indent=2, default=str)
 
-        # 8. Write to Gold Trajectories (Continuous Saving)
+        # Write to Gold Trajectories (Continuous Saving)
         if solution_state:
             print(f"  -> Solution found! Cost: {solution_state['total_joules']:.4f} J")
             

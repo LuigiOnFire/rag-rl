@@ -51,7 +51,9 @@ class SoftJudge:
         self.refusal_phrases = [
             "i don't know", "no question provided", "cannot answer", 
             "context is empty", "provide more information", "unsure", 
-            "none", "null", "no answer"
+            "none", "null", "no answer", "not specified", "cannot determine", 
+            "information is not available", "does not mention", 
+            "i cannot conclude", "no information found"
         ]
 
     def judge(self, prediction: str, ground_truth: str, question: str) -> tuple[bool, str]:
@@ -66,6 +68,13 @@ class SoftJudge:
         if not norm_pred or any(phrase in norm_pred for phrase in self.refusal_phrases):
             logger.warning("JUDGE: Detected Refusal/Empty Answer -> FAIL")
             return False, "Refusal"
+        
+        # --- QUESTION-PARROT FILTER---
+        if norm_q and len(norm_pred) > 5:
+            threshold = 0.85
+            if similarity_score(norm_pred, norm_q) >= threshold:
+                logger.warning("JUDGE: Detected Question Parroting -> FAIL")
+                return False, "Repeated Question, Parroting"
 
         # --- Tier 1: String Match (Normalized Inclusion) ---
         # Stricter Inclusion: Exact match or restricted substring
@@ -78,7 +87,7 @@ class SoftJudge:
         
         # --- Tier 2: Token F1 ---
         f1 = f1_score(prediction, ground_truth)
-        if f1 > 0.8: # Increased threshold
+        if f1 > 0.75: # Lowering theshold now that we have the parroting guard
             logger.info(f"JUDGE: Tier 2 (F1={f1:.2f}) -> PASS")
             return True, f"Tier 2 (F1={f1:.2f})"
         
@@ -92,19 +101,18 @@ class SoftJudge:
         prompt = f"""
         You are a strict, impartial judge avoiding false positives.
         
-        Question: Are the Prediction and Ground Truth effectively the same answer?
-        
+        Task: Determine if the Prediction correctly answers the Question based on the Ground Truth.
+
+        Question: "{question}"        
         Ground Truth: "{ground_truth}"
         Prediction: "{prediction}"
 
         Instructions:
-        1. Ignore minor differences in capitalization, punctuation, or phrasing.
-        2. Identify the core entity or fact in both.
-        3. If the Prediction is the opposite (e.g., "Yes" vs "No"), it is Wrong.
-        4. If the Prediction contains the Ground Truth but negates it (e.g., "Did not win"), it is Wrong.
-        5. If the Prediction is "I don't know", it is Wrong.
+        1. Does the Prediction constitute the same answer to the Question as the Ground Truth?
+        2. Ignore minor wording differences or verbosity ("the capital of France is Paris" vs "Paris").
+        3. If the prediction contains the correct answer but repeats the question, it should be marked as incorrect.
 
-        First, explain your reasoning in one sentence.
+        First, briefly explain your reasoning in one sentence.
         Then, output the final verdict as "Verdict: YES" or "Verdict: NO".
         """
         
