@@ -4,6 +4,8 @@ import random
 from typing import List
 import os
 import sys
+import time
+import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 
@@ -16,12 +18,22 @@ from src.agent.prompts import format_state_for_prompt
 from src.agent import actions
 from src.data.hotpot import HotpotQAStreamer
 from src.env.retriever import EphemeralRetriever
-from src.env.engine_old import execute_action
+from src.env.engine import GreenEngine
 
 # --- CONFIG ---
 BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 ADAPTER_PATH = "models/green-rag-sft-v1"
 MAX_STEPS = 5
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+
+run_id = time.strftime("%Y%m%d_%H%M%S")
+RUN_FILE = f"data/post_sft_tests/run_{run_id}.log"
+os.makedirs(os.path.dirname(RUN_FILE), exist_ok=True)
+logger.debug(f"Run File: {RUN_FILE}")
+
 
 def load_director():
     print(f"Loading 1B Director from {ADAPTER_PATH}...")
@@ -39,7 +51,7 @@ def load_director():
     model.eval()
     return model, tokenizer
 
-def get_director_action(model, tokenizer, state: GreenState):
+def get_director_action(model, tokenizer, state: GreenState):    
     # Same logic as before
     prompt = format_state_for_prompt(state) + " Action:"
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
@@ -57,17 +69,17 @@ def get_director_action(model, tokenizer, state: GreenState):
     
     # Simple Parser
     action_id = -1
-    argument = "Ready to Answer"
     
     act_match = re.search(r"(\d+)", new_tokens)
     if act_match:
         action_id = int(act_match.group(1))
-        
-    arg_match = re.search(r"Input:\s*(.*)", new_tokens, re.DOTALL)
-    if arg_match:
-        argument = arg_match.group(1).strip()
-        
-    return action_id, argument
+
+    with open(RUN_FILE, "a") as f:
+        f.write(f"\n--- PROMPT FOR MODEL ---\n{prompt}\n")
+        f.write(f"\n--- MODEL OUTPUT ---\n{new_tokens}\n")
+        f.write(f"\n--- PARSED ACTION ID: {action_id} ---\n")
+                
+    return action_id
 
 def run_hotpot_episode(model, tokenizer, sample: dict):
     question = sample['question']
@@ -78,26 +90,24 @@ def run_hotpot_episode(model, tokenizer, sample: dict):
     # 1. Init State & Tiny Search Engine
     state = create_initial_state(question)
     local_retriever = EphemeralRetriever(corpus)
+
+    engine = GreenEngine(retriever=local_retriever)
+
+    with open(RUN_FILE, "a") as f:
+        f.write(f"\n\n=== NEW EPISODE ===\nQuestion: {question}\n")
     
     for step in range(MAX_STEPS):
         print(f"\n--- Step {step+1} ---")
         
         # Decide
-        action_id, argument = get_director_action(model, tokenizer, state)
+        action_id = get_director_action(model, tokenizer, state)
         
         # Act (Pass the local retriever!)
-        obs, done = execute_action(state, action_id, argument, local_retriever)
-        
-        print(f"  >> Obs: {obs}")
-        
-        state['history'].append({
-            "action_id": action_id, 
-            "action_name": actions.get_action_name(action_id),
-            "observation": obs
-        })
-        
-        if done:
-            print(f"\n*** DONE ***\nPrediction: {obs}")
+        new_state = engine.step(state, action_id)
+        state = new_state
+                        
+        if new_state['status'] == "SOLVED":
+            print(f"\n*** DONE ***\nPrediction: {new_state.get('answer')}")
             print(f"Ground Truth: {sample['answer']}")
             break
 

@@ -5,7 +5,7 @@ from typing import Any, Tuple, TypedDict, cast, Dict
 # Project Imports
 from src.env.state import create_initial_state, GreenState
 from src.env.retriever import EphemeralRetriever
-from src.env.engine_old import execute_action
+from src.env.engine import GreenEngine
 from src.rl.rewards import calculate_reward
 from src.agent.prompts import format_state_for_prompt
 # We can import parse_action logic or define it here. 
@@ -19,6 +19,7 @@ class GreenRAGEnv(gym.Env):
         self.current_sample = None
         self.state = None
         self.retriever = None
+        self.ground_truth = None
         
         # Define spaces if needed (Text based environment, spaces are formal)
         # Using simple discrete action space is misleading as we generate text.
@@ -51,7 +52,10 @@ class GreenRAGEnv(gym.Env):
             self.current_sample = next(self.data_iterator)
 
         self.state = create_initial_state(self.current_sample['question'], self.current_sample['answer'])
+        self.ground_truth = self.current_sample['answer']
         self.retriever = EphemeralRetriever(self.current_sample['corpus'])
+        self.engine = GreenEngine(retriever=self.retriever)
+
         
         obs = format_state_for_prompt(cast(Dict[str, Any], self.state))
         return obs, {}
@@ -59,6 +63,12 @@ class GreenRAGEnv(gym.Env):
     def step(self, action_text: str) -> Tuple[str, float, bool, bool, dict]:
         # --- ARTIFACT CLEANER ---
         # 1. Strip Token Garbage
+        if self.state is None:
+            raise ValueError("Environment state is None. Did you forget to reset the environment?") 
+        
+        if self.ground_truth is None:
+            raise ValueError("Ground truth answer is None. Did you forget to reset the environment?")
+        
         for bad_token in ["<|eot_id|>", "<|end_of_text|>", "</s>"]:
             action_text = action_text.replace(bad_token, "")
             
@@ -100,16 +110,21 @@ class GreenRAGEnv(gym.Env):
                 clean_argument = self.state['subqueries'][-1]['question']
 
         # 3. Execute
-        obs_text, done = execute_action(self.state, action_id, clean_argument, self.retriever)
+        self.state = self.engine.step(self.state, action_id, clean_argument)
 
+        
+
+        answer = self.state["answer"] if self.state["answer"] is not None else ""
+
+        done = self.state['status'] in ["SOLVED", "FAILED"]
         # 4. Reward
         reward, breakdown = calculate_reward(
             self.state, 
             action_text, # Passed for length penalty calculation
-            self.current_sample['answer'], 
+            self.ground_truth,
             action_id, 
             done, 
-            obs_text # Passed for correctness check
+            answer # Passed for correctness check
         )
 
         # 5. Return

@@ -4,6 +4,7 @@ import copy
 from typing import Any, Dict, List, Union
 import glob
 import json
+import time
 import os
 import sys
 from datasets import Dataset
@@ -20,65 +21,24 @@ from trl.trainer.sft_trainer import SFTTrainer
 from trl.trainer.sft_config import SFTConfig
 
 sys.path.append(os.getcwd())
-from src.train.dataset import create_green_dataset
+from src.train.dataset import load_and_clean_dataset
+from src.agent.prompts import format_state_for_prompt
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
 BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-RUN_LOGS_DIR = "data/runs"
+RUN_LOGS_DIR = "data/trajectories"
 OUTPUT_DIR = "models/green-rag-sft-v1"
 # --- 1. CLEANING & LOADING LOGIC ---
-def load_and_clean_dataset(run_dir: str, tokenizer: Any) -> Dataset:
-    """
-    Loads all gold_trajectories.jsonl files, removes 'Answer Generation' artifacts,
-    and returns a Hugging Face Dataset.
-    """
-    files = glob.glob(f"{run_dir}/**/gold_trajectories.jsonl", recursive=True)
-    if not files:
-        raise ValueError(f"No trajectory files found in {run_dir}")
-        
-    logger.info(f"Found {len(files)} trajectory files. Processing...")
-    
-    clean_samples = []
-    
-    for fpath in files:
-        with open(fpath, 'r') as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                    text = data.get("text", "")
-                    
-                    # --- SANITIZATION ---
-                    # The artifact usually appears as: "... Action: 0\nInput: Answer Generation"
-                    # We want to stop exactly at the Action ID.
-                    
-                    if "Answer Generation" in text:
-                        # Split by Action 0 or Action 1 and discard the tail
-                        if "Action: 0" in text:
-                            text = text.split("Action: 0")[0] + " Action: 0"
-                            logging.info("Removed 'Answer Generation' artifact at Action: 0")
-                        elif "Action: 1" in text:
-                            text = text.split("Action: 1")[0] + " Action: 1"
-                            logging.info("Removed 'Answer Generation' artifact at Action: 1")
-                    
-                    # Also strip trailing "Input:" if it was left dangling
-                    text = text.replace("Input: Ready to Answer", "")
-                    text = text.strip()
-                    
-                    # --------------------
-                    
-                    clean_samples.append({"text": text})
-                except json.JSONDecodeError:
-                    continue
+# src/train/dataset.py
 
-    logger.info(f"Loaded {len(clean_samples)} clean samples.")
-    
-    # Create HF Dataset
-    return Dataset.from_list(clean_samples)
-
+import json
+import glob
+import logging
+from datasets import Dataset
 
 # --- MANUAL COLLATOR IMPLEMENTATION (Bypasses Import Errors) ---
 class CompletionOnlyCollator(DataCollatorForLanguageModeling):
@@ -131,17 +91,27 @@ def main():
     # Look for all gold_trajectories.jsonl recursively
     jsonl_files = glob.glob(f"{RUN_LOGS_DIR}/**/gold_trajectories.jsonl", recursive=True)
     if not jsonl_files:
-        print("No training data found in data/runs/**/gold_trajectories.jsonl")
+        print("No training data found in data/trajectories/**/gold_trajectories.jsonl")
         return
 
     print(f"Found {len(jsonl_files)} trajectory files.")
 
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = f"data/sft_runs/run_{run_id}"
+    os.makedirs(run_dir, exist_ok=True)
+    logging.debug(f"Run Directory: {run_dir}")
+    
+
     # 3. Create Dataset
     # Returns a Hugging Face 'datasets.Dataset'
-    dataset = create_green_dataset(jsonl_files, tokenizer)
+    dataset = load_and_clean_dataset(jsonl_files, tokenizer)
     if len(dataset) == 0:
         print("Dataset is empty. Exiting.")
         return
+    
+    entries_to_log = min(100, len(dataset))
+    print(f"DEBUG: Writing {len(dataset)} samples to 'debug_dataset.json'...")
+    dataset.select(range(entries_to_log)).to_json(f"{run_dir}/dataset_preview.json", orient="records", lines=True)
     
     # --- MASKING SETUP ---
     response_template = " Action:" 

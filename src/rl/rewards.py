@@ -77,6 +77,7 @@ def calculate_reward(
     
     total_reward = 0.0
     breakdown = {"correct": 0.0, "format": 0.0, "bonus": 0.0, "cost": 0.0}
+    question = state.get("question", "")
 
     # 1. FORMAT & REPETITION CHECKS
     if action_id in [-1, 9]:
@@ -116,7 +117,7 @@ def calculate_reward(
 
     # 3. OUTCOME REWARD
     if done and action_id in [0, 1]:
-        is_correct, reason = judge.judge(obs, ground_truth)
+        is_correct, reason = judge.judge(obs, ground_truth, question)
         
         if is_correct:
             total_reward += REWARD_CORRECT

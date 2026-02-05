@@ -7,61 +7,58 @@ from src.agent.prompts import format_state_for_prompt
 
 logger = logging.getLogger(__name__)
 
-def create_green_dataset(jsonl_paths: List[str], tokenizer: Any) -> Dataset:
-    """
-    Loads trajectories from JSONL and constructs a Hugging Face Dataset ready for SFTTrainer.
-    """
+
+def load_and_clean_dataset(jsonl_files: list, tokenizer) -> Dataset:
+    
     samples = []
     
-    # 1. Load and Flatten
-    for path in jsonl_paths:
-        with open(path, "r") as f:
-            for line in f:
+    for fpath in jsonl_files:
+        with open(fpath, 'r') as f:
+            for line_num, line in enumerate(f):
                 try:
-                    record = json.loads(line)
-                    steps = record.get("steps", [])
+                    # Parse the Episode
+                    episode = json.loads(line)
                     
-                    if not steps:
+                    # Validate Structure
+                    if "steps" not in episode:
                         continue
                         
-                    for step in steps:
-                        # Pre-process content here
+                    # --- THE FIX: ITERATE STEPS ---
+                    for step in episode["steps"]:
+                        
+                        # A. Reconstruct Prompt (X)
+                        # We use the 'pre_state' because that's what the agent saw 
+                        # BEFORE making the decision.
                         pre_state = step["pre_state"]
+                        prompt_text = format_state_for_prompt(pre_state)
                         
-                        # Double Sanitize
-                        if "ground_truth" in pre_state:
-                            del pre_state["ground_truth"]
+                        # B. Format Target (Y)
+                        # The action the agent took in this step
+                        action_id = step["action_id"]
+                        argument = step.get("argument", "")
+                        
+                        # Format: " Action: 3" or " Action: 2 search query"
+                        # Ensure spacing matches your tokenizer/collator expectation
+                        target_text = f" Action: {action_id}"
+                        if argument:
+                            target_text += f" {argument}"
                             
-                        # Format Text
-                        prompt_text = format_prompt(pre_state)
-                        completion_text = format_completion(step["action_id"], step["argument"])
-                        full_text = prompt_text + completion_text + tokenizer.eos_token
-
-                        logging.warning(f"Added sample from {path}: {full_text[:300]}...")
+                        # C. Combine
+                        # We append an EOS token if packing=False manually, 
+                        # though Trainer usually handles it. Adding it explicitly is safer.
+                        full_text = prompt_text + target_text + tokenizer.eos_token
                         
-                        samples.append({
-                            "text": full_text
-                        })
-
-
+                        samples.append({"text": full_text})
+                        
                 except json.JSONDecodeError:
+                    logging.warning(f"Skipping bad JSON in {fpath} line {line_num}")
                     continue
-                    
-    logger.info(f"Loaded {len(samples)} training samples from {len(jsonl_paths)} files.")
-    
-    if not samples:
-         # Fallback for empty runs to prevent crash
-        logger.warning("No samples found. Creating dummy dataset.")
-        return Dataset.from_list([{"text": "Empty"}])
 
-    # Logs the very first sample so you can verify the Prompt/Completion format visually.
-    logger.info(f"\n{'='*40}\nSAMPLE TRAINING DATA (Item 0):\n{'='*40}\n{samples[0]['text']}\n{'='*40}\n")
-    
-    # Return standard HF Dataset
+    logging.info(f"Extracted {len(samples)} training steps from {len(jsonl_files)} files.")
     return Dataset.from_list(samples)
 
-def format_prompt(state: Dict[str, Any]) -> str:
-    return format_state_for_prompt(state)
+# def format_prompt(state: Dict[str, Any]) -> str:
+    # return format_state_for_prompt(state)
 
 def format_completion(action_id: int, argument: str) -> str:
     """
