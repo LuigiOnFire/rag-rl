@@ -112,11 +112,13 @@ class GreenRAGEnv(gym.Env):
         # 3. Execute
         self.state = self.engine.step(self.state, action_id, clean_argument)
 
-        
+        latest_obs = ""
+        if self.state['history']:
+            latest_obs = self.state['history'][-1]['observation']
 
         answer = self.state["answer"] if self.state["answer"] is not None else ""
-
         done = self.state['status'] in ["SOLVED", "FAILED"]
+        
         # 4. Reward
         reward, breakdown = calculate_reward(
             self.state, 

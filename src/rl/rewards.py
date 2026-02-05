@@ -106,7 +106,7 @@ def calculate_reward(
         # Count prior search actions (Robust integer check, no string parsing)
         prior_search_count = sum(1 for h in history if h.get('action_id') in [2, 3])
         
-        if prior_search_count == 0:
+        if prior_search_count == 1:
             # First time? Here is your cookie.
             total_reward += REWARD_DISCOVERY
             breakdown['bonus'] += REWARD_DISCOVERY

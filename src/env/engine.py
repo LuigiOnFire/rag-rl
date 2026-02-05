@@ -8,9 +8,6 @@ from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
 from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logging.getLogger().setLevel(logging.DEBUG)
-
 # Get the cost table
 try:
     with open("data/meta/cost_table.json", "r") as f:
@@ -51,7 +48,6 @@ class GreenEngine:
         # Execute the action using the engine function
         # We don't use the obs or argument for generation
         obs = ""
-        final_argument = ""
 
         logging.debug(f"Attempting Action ID {action_id} on State with status: {new_state['status']}")
 
@@ -106,6 +102,7 @@ class GreenEngine:
         elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
         # Grade the documents in the active subquery
         # Not checked, may not work
+            count_rel = 0
             if active_subquery is not None:
                 logging.debug(f"Grading documents for active subquery: {active_subquery['question']}")
                 for doc in active_subquery['documents']:
@@ -166,7 +163,7 @@ class GreenEngine:
         # [9]: FAILURE
         elif action_id == actions.ACTION_FAIL:
             obs = "Agent declared failure."
-            done = True
+            new_state['status'] = "FAILED" # <--- Persist the failure
 
         # --- FALLBACK ---
         else:
@@ -180,7 +177,7 @@ class GreenEngine:
             action_id=action_id,
             action_name=actions.get_action_name(action_id),
             observation=obs,
-            argument=final_argument,
+            argument=argument if argument is not None else "",
             cost=step_cost
         ))
 

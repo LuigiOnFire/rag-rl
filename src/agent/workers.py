@@ -115,14 +115,35 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 
     # 2. Prompt
     prompt = f"""
-    Question: {query}
-    
-    Gathered Facts:
-    {context_str}
-    
-    Instruction: Provide a direct, concise answer to the question based ONLY on the Gathered Facts. 
-    If the facts are insufficient, say "I cannot answer based on available info."
-    """
+### ROLE
+You are a strict Question-Answering extraction system. You are NOT a conversational assistant. 
+
+### TASK
+Extract the answer to the Question based on the provided Context.
+
+### CONSTRAINTS
+1. Output Type: Return ONLY the specific entity, name, date, or number requested. 
+2. Grammar: DO NOT use complete sentences. DO NOT say "The answer is...".
+3. Style: Be robotic and concise.
+4. Fallback: If the Context is completely empty or irrelevant, output exactly: "NO_CONTEXT"
+
+### EXAMPLES
+Question: "What is the capital of France?"
+Bad Answer: "The capital of France is Paris."
+Bad Answer: "It is Paris."
+Good Answer: "Paris"
+
+Question: "Who won the 1996 World Series?"
+Good Answer: "New York Yankees"
+
+### INPUT DATA
+Question: "{query}"
+
+Context:
+{context_str}
+
+### YOUR ANSWER
+"""
     
     return worker.generate(prompt).strip()
 

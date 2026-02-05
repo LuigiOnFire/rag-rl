@@ -6,11 +6,8 @@ from difflib import SequenceMatcher
 
 from src.agent.workers import llm_worker
 
-
 USE_LLM_JUDGE = True
 
-# 1. Setup Logging (Ensures you see output immediately)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 def normalize_answer(s):

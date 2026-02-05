@@ -10,8 +10,10 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import os
 import sys
 import re
+import time
 import logging
 from typing import Dict, Any, cast
+import argparse
 
 sys.path.append(os.getcwd())
 
@@ -23,13 +25,16 @@ SFT_MODEL_PATH = "models/green-rag-sft-v1"
 OUTPUT_DIR = "models/green-rag-rl-v1"
 MAX_STEPS = 5  # Max turns per episode
 EPISODE_COUNT = 4000 # Total episodes to train
-LOG_FILE = "ppo_training_log.txt"
+
+run_id = time.strftime("%Y%m%d_%H%M%S")
+RUN_FILE = f"data/ppo_training/run_{run_id}.log"
+os.makedirs(os.path.dirname(RUN_FILE), exist_ok=True)
 
 logging.basicConfig(
-    level=logging.INFO,       # Set to logging.DEBUG for more verbosity
+    level=logging.DEBUG,       # Set to logging.DEBUG for more verbosity
     format='%(message)s',     # Just print the message (no time, no level name)
     handlers=[
-        logging.FileHandler(LOG_FILE, mode='w'),
+        logging.FileHandler(RUN_FILE, mode='w'),
         logging.StreamHandler(sys.stdout)
     ],
     force=True
@@ -64,7 +69,11 @@ class PPOAgentTrainer:
     def generate(self, query_tensor, **kwargs):
         # Generate in eval mode to avoid caching gradients for the rollout
         with torch.no_grad():
-            response = self.model.generate(query_tensor, **kwargs)
+            response = self.model.generate(
+                query_tensor, 
+                tokenizer=self.tokenizer, # <--- ADD THIS ARGUMENT
+                **kwargs
+            )
         return response
 
     def step(self, query, response, score):
@@ -177,6 +186,9 @@ class PPOAgentTrainer:
         return {"loss": loss_sum / self.config.num_ppo_epochs, "reward": score}
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to the checkpoint folder to resume from")
+    args = parser.parse_args()
     print("Initializing RL Phase...")
     
     # 1. Load Models & Config
@@ -263,7 +275,8 @@ def main():
                 repetition_penalty=1.2,
                 max_new_tokens=40,
                 pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id            
+                eos_token_id=tokenizer.eos_token_id,
+                stop_strings=["\n", "<|eot_id|>"] # we just need the digit for action
             )
             response_tensor = trainer.generate(query_tensor, generation_config=generation_config)
             

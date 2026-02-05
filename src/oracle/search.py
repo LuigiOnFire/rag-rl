@@ -9,7 +9,6 @@ from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 from src.env.engine import GreenEngine
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger().setLevel(logging.DEBUG)
 
 trace_logger = logging.getLogger("LLM_TRACE")
@@ -37,6 +36,8 @@ class OracleSearch:
         self.engine = GreenEngine(retriever=retriever)
         self.retriever = retriever
         self.judge = SoftJudge()
+        # If set, the first action will always be DEC_LLM
+        self.force_decompose = False
 
     def get_valid_actions(self, state: GreenState) -> List[int]:
         # 1. Parse the last action from history to check context
@@ -47,14 +48,19 @@ class OracleSearch:
 
         # 2. START OF TURN (Don't start with grade or rewrite)
         if not state['history']:
-            return [
-                actions.ACTION_RET_KEY, 
-                actions.ACTION_RET_VEC, 
-                actions.ACTION_DEC_SLM,
-                actions.ACTION_DEC_LLM,
-                actions.ACTION_GEN_SLM, 
-                actions.ACTION_GEN_LLM
-            ]
+            if self.force_decompose:
+                return [
+                    actions.ACTION_DEC_LLM,
+                ]
+            else:
+                return [
+                    actions.ACTION_RET_KEY, 
+                    actions.ACTION_RET_VEC, 
+                    actions.ACTION_DEC_SLM,
+                    actions.ACTION_DEC_LLM,
+                    actions.ACTION_GEN_SLM, 
+                    actions.ACTION_GEN_LLM
+                ]
 
         # 3. MIDDLE OF TURN
         else:
@@ -150,9 +156,6 @@ class OracleSearch:
 
                 trace_logger.debug(f"JUDGE LOG -- Q: {question} | A: {final_answer} | GT: {ground_truth} | Correct: {is_correct} | Reason: {reason}")
 
-                
-                # judge_verdict = is_correct
-                # judge_reason = reason
                 
                 if is_correct:
                     # Old Logic would keep looking for cheaper solutions
