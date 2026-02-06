@@ -1,2 +1,1 @@
-- rework genearte answer prompt to favor conciseness/be okay if there aren't documents
-- write code to force decomposition first in trajectory generation
+- rewrite the "rewrite" prompt, it currently takes the state and posts it verbatim, quite ugly

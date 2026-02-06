@@ -39,6 +39,9 @@ class OracleSearch:
         # If set, the first action will always be DEC_LLM
         self.force_decompose = False
 
+        # Maybe a temporary flag, if we have already decompose, never do it again in the same episode
+        self.decompose_once = True
+
     def get_valid_actions(self, state: GreenState) -> List[int]:
         # 1. Parse the last action from history to check context
         last_action_id = None
@@ -68,12 +71,10 @@ class OracleSearch:
             valid = [
                 actions.ACTION_RET_KEY, 
                 actions.ACTION_RET_VEC, 
-                actions.ACTION_DEC_SLM,
-                actions.ACTION_DEC_LLM, 
                 actions.ACTION_GEN_SLM, 
                 actions.ACTION_GEN_LLM
             ]
-            
+
             # LOGIC FIX: Only allow GRADE if we just RETRIEVED
             # otherwise, what are we grading?
             retrieval_ids = [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]
@@ -85,6 +86,11 @@ class OracleSearch:
             # (Optional, but saves energy)
             if last_action_id == actions.ACTION_GRD_SLM:
                 valid.append(actions.ACTION_RWT_SLM)
+            
+            # If we have decompose once active, don't allow further decomposition
+            if not self.decompose_once:
+                valid.append(actions.ACTION_DEC_SLM)
+                valid.append(actions.ACTION_DEC_LLM)
 
             return valid
 
@@ -117,15 +123,10 @@ class OracleSearch:
         nodes_expanded = 0
 
         while pq:
-            logging.debug("RESTARTING LOOP: WE SHOULD SEE MANY NODES EXPANDED")
-            logging.debug(f"Priority Queue Size: {len(pq)}")
             cost, _, current_node = heapq.heappop(pq)
             # MUCH OF THIS FUNCTIONALITY WILL BE MOVED TO engine.py
             current_state = current_node.state
             nodes_expanded += 1
-            
-           # Log this step (snapshot summary)
-            logging.debug(f"Step {nodes_expanded}: cost={cost}, history_len={len(current_state['history'])}, last_action={current_state['history'][-1]['action_id'] if current_state['history'] else 'START'}, status={current_state.get('status', 'SOLVING')}")
             step_info = {
                 "step_idx": nodes_expanded,
                 "cost": cost,
@@ -150,8 +151,6 @@ class OracleSearch:
                     logging.debug("No final answer found in SOLVED state; continuing search.")
                     continue
 
-                logging.debug(f"Final answer to judge: {final_answer}")
-                logging.debug(f"Solved with answer: {final_answer}")                
                 is_correct, reason = self.judge.judge(final_answer, ground_truth, question)
 
                 trace_logger.debug(f"JUDGE LOG -- Q: {question} | A: {final_answer} | GT: {ground_truth} | Correct: {is_correct} | Reason: {reason}")
@@ -181,6 +180,8 @@ class OracleSearch:
             # We will tell the engine to try each action
             for action_id in valid_actions:
                 try:
+                    trace_logger.debug(f"The search is taking action {action_id} from state with history length {len(current_state['history'])} and status {current_state.get('status', 'UNKNOWN')}")
+
                     # Deep copy logic for Dict-based state
                     # new_state = copy.deepcopy(current_state)
                     

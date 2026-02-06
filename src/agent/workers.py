@@ -84,10 +84,16 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
         query = state['question']
     else:
         query = active_sub_query['question']
-    
+
     # 1. Gather Context
     context_str = ""
     found_docs = False
+    
+    # If we are answering the main query, we want to questions and answers of all subqueries.
+    if active_sub_query is None:
+        for i, query in enumerate(state.get('subqueries', [])):
+            if 'answer' in query:
+                context_str += f"\nSub-question {i+1}: {query['question']}\nAnswer: {query['answer']}\n"
     
     # We look at all subqueries to build a "Knowledge Base" for the answer
 

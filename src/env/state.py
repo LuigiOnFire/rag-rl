@@ -60,9 +60,9 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
 
 def get_active_subquery(state: GreenState):
     # Find last active or pending
+    # NO LONGER sets state as active
     for sub in reversed(state['subqueries']):
         if sub['status'] in ["ACTIVE", "PENDING"]:
-            sub['status'] = "ACTIVE"  # Mark as active
             return sub
     
     # If there are no subqueries, return None

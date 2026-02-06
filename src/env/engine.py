@@ -16,6 +16,9 @@ except FileNotFoundError:
     print("Warning: cost_table.json not found. Using default costs (1.0).")
     COST_TABLE = {}
 
+trace_logger = logging.getLogger("LLM_TRACE")
+trace_logger.addHandler(logging.NullHandler())
+
 # A class to encapsulate the engine logic and manage the state
 class GreenEngine:
     def __init__(self, retriever: EphemeralRetriever):
@@ -44,6 +47,9 @@ class GreenEngine:
 
         # Identify which subquery that will be influenced by actions the operate on subqueries
         active_subquery = get_active_subquery(new_state)
+        # Set the new subquery as active
+        if active_subquery is not None:
+            active_subquery["status"] = "ACTIVE"
 
         # Execute the action using the engine function
         # We don't use the obs or argument for generation
@@ -59,21 +65,31 @@ class GreenEngine:
             # This function will figure out what the active query is on its own
             answer = workers.generate_answer(new_state, use_llm=use_llm)
 
-            logging.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
-            logging.debug(f"LLM RESPONDS: {answer}")
+            trace_logger.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
+            trace_logger.debug(f"LLM RESPONDS: {answer}")
 
             # If we have an active subquery, we update that
             if active_subquery:
                 active_subquery['answer'] = answer
                 active_subquery['status'] = "ANSWERED"
                 obs = f"Sub-query answered: {answer}"
+                logging.debug(f"Updated active subquery with answer: {answer}")
+                trace_logger.debug(f"Sub-query answered:\nQ: {active_subquery['question']}\nA: {answer}")
+                trace_logger.debug(f"This is the state of all subqueries after answering:\n" + "\n".join([f"{sub['question']} - {sub['status']}" for sub in new_state['subqueries']]))
+                
+                new_subquery = get_active_subquery(new_state)
+                new_q_text = new_subquery['question'] if new_subquery else "None"
+
+                trace_logger.debug(f"If we look for active query now we get: {new_q_text}")
+
             else:
                 # Otherwise we update the main query
                 new_state['answer'] = answer
                 new_state['status'] = "SOLVED"
                 obs = f"Main query answered: {answer}"
+                trace_logger.debug(f"Main query answered: {answer}")
 
-            
+
         # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---
         # This will do for now but I'd like the model to know whether the it's doing
         # a keyword or vector search
@@ -124,6 +140,9 @@ class GreenEngine:
         # [6]: REWRITE (RWT_SLM)
         elif action_id == actions.ACTION_RWT_SLM:           
             active_subquery = get_active_subquery(new_state)
+
+            if active_subquery is not None:
+                active_subquery["status"] = "ACTIVE"
 
             if active_subquery is not None:
                 active_subquery["answer"] = workers.generate_rewrite(new_state)

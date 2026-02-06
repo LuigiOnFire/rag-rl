@@ -15,11 +15,11 @@ from src.oracle.search import OracleSearch
 from src.data.hotpot import HotpotQAStreamer
 
 # Frequency with which to force decomposition
-FORCE_DECOMP_RATE = 0.50
+FORCE_DECOMP_RATE = 1
 
 def main():
     # Initialize Logging
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s/n%(message)s')
     logging.getLogger().setLevel(logging.DEBUG)
     print("Starting Oracle Generation...")
 
