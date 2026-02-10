@@ -26,8 +26,6 @@ def format_state_for_prompt(state):
          
    prompt += "\n"
 
-   # --- NEW: DOCUMENTS SECTION ---
-   # This was missing! The model needs to see what it found.
    documents = state.get('documents', [])
    if documents:
       prompt += "CONTEXT (Retrieved Documents):\n"
@@ -37,7 +35,6 @@ def format_state_for_prompt(state):
          # Limit content length to prevent context overflow if needed
          prompt += f"[{i+1}] {title}: {content}\n"
       prompt += "\n"
-   # ------------------------------
    
    # 3. Sub-Tasks (Stack)
    subqueries = state.get('subqueries', [])

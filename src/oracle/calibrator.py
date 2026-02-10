@@ -2,6 +2,10 @@ import statistics
 import json
 from codecarbon import EmissionsTracker
 from src.agent import actions, workers
+from src.env.state import GreenState, create_initial_state
+from src.env.retriever import EphemeralRetriever
+from src.env.engine import GreenEngine
+
 
 class EnergyCalibrator:
     def __init__(self, iterations: int = 5, output_path: str = "data/meta/cost_table.json"):
@@ -20,10 +24,9 @@ class EnergyCalibrator:
         self.dummy_response = "Paris."
 
     def _get_args_for_action(self, action_id):
-        from src.env.state import GreenState
+        retriever = EphemeralRetriever(documents=self.dummy_docs)
         # Need a Dummy State object now that workers expect State
-        state = GreenState(question=self.dummy_query)
-        state.context = self.dummy_context
+        state = create_initial_state(self.dummy_query)
         # History string simulation
         history_str = "Action: 2 | Arg: 'capital France' | Obs: 'Found 1 docs...'"
 
@@ -60,7 +63,8 @@ class EnergyCalibrator:
         # We need to map Action IDs to the actual function calls we want to measure.
         # Since we refactored, we need to bind them manually here.
         
-        for action_id, name in actions.ACTION_NAMES.items():
+        for action_id in actions.ALL_ACTION_IDS:
+            name = actions.get_action_name(action_id)
             if action_id == actions.ACTION_FAIL:
                 self.cost_table[str(action_id)] = 0.0
                 continue
@@ -72,25 +76,25 @@ class EnergyCalibrator:
             args = self._get_args_for_action(action_id)
             
             if action_id == actions.ACTION_GEN_SLM:
-                func = lambda s, h: workers.generate_answer(s, h, use_llm=False)
+                func = lambda s, h: workers.generate_answer(s, use_llm=False)
             elif action_id == actions.ACTION_GEN_LLM:
-                func = lambda s, h: workers.generate_answer(s, h, use_llm=True)
+                func = lambda s, h: workers.generate_answer(s, use_llm=True)
             elif action_id == actions.ACTION_RET_KEY:
                 # Measure Generation of query 
                 # (Retrieval itself is "Ephemeral" and fast in this sim, but we might want to price the generation)
-                func = lambda s, h: workers.generate_search_query(s, h)
+                func = lambda s, h: workers.generate_query_for_keyword_search(s)
             elif action_id == actions.ACTION_RET_VEC:
-                 func = lambda s, h: workers.generate_search_query(s, h)
+                 func = lambda s, h: workers.generate_query_for_vector_search(s)
             elif action_id == actions.ACTION_GRD_SLM:
                 func = lambda s, d: workers.generate_grade(s, d, use_llm=False)
             elif action_id == actions.ACTION_GRD_LLM:
                  func = lambda s, d: workers.generate_grade(s, d, use_llm=True)
             elif action_id == actions.ACTION_RWT_SLM:
-                func = lambda s, h: workers.generate_rewrite(s, h)
+                func = lambda s, h: workers.generate_rewrite(s)
             elif action_id == actions.ACTION_DEC_SLM:
-                func = lambda s, h: workers.generate_plan(s, h, use_llm=False)
+                func = lambda s, h: workers.generate_plan(s, use_llm=False)
             elif action_id == actions.ACTION_DEC_LLM:
-                func = lambda s, h: workers.generate_plan(s, h, use_llm=True)
+                func = lambda s, h: workers.generate_plan(s, use_llm=True)
 
             if not func:
                 print(f"Skipping {name} (No function mapped)")

@@ -81,74 +81,78 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     # Determine the active query by using the ID
     active_sub_query = get_active_subquery(state)
     if active_sub_query is None:
-        query = state['question']
+        question_text = state['question']
     else:
-        query = active_sub_query['question']
+        question_text = active_sub_query['question']
 
-    # 1. Gather Context
-    context_str = ""
-    found_docs = False
-    
-    # If we are answering the main query, we want to questions and answers of all subqueries.
-    if active_sub_query is None:
-        for i, query in enumerate(state.get('subqueries', [])):
-            if 'answer' in query:
-                context_str += f"\nSub-question {i+1}: {query['question']}\nAnswer: {query['answer']}\n"
-    
-    # We look at all subqueries to build a "Knowledge Base" for the answer
+    # 1. Gather Sub-Task History (Q&A)
+    # --------------------------------
+    # This creates a log of what the agent has already solved.
+    history_parts = []
+    for i, sq in enumerate(state.get('subqueries', [])):
+        # Only include answered queries to avoid confusing the model
+        if sq.get('status') == "ANSWERED" and sq.get('answer'):
+            history_parts.append(f"Sub-question {i+1}: {sq['question']}")
+            history_parts.append(f"Answer: {sq['answer']}\n")
+    qa_section = "\n".join(history_parts)
 
-    # First get top level docs
-    for doc in state['documents']:
-        # Leniency: Include UNKNOWN docs if we haven't graded them yet
+    # 2. Gather Relevant Documents (Facts)
+    # ------------------------------------
+    # Collect docs from the main state AND all subqueries into one list
+    all_docs = state.get('documents', []) + [
+        d for sub in state.get('subqueries', []) for d in sub.get('documents', [])
+    ]
+    
+    doc_parts = []
+    for doc in all_docs:
+        # Leniency: Include UNKNOWN (ungraded) or RELEVANT docs
+        # We explicitly exclude IRRELEVANT docs to save context window
         if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
-            context_str += f"- {doc['content']}\n"
-            found_docs = True
-
-    # Then get subquery docs
-    for sub in state['subqueries']:
-        for doc in sub['documents']:
-            # Leniency: Include UNKNOWN docs if we haven't graded them yet
-            if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
-                context_str += f"- {doc['content']}\n"
-                found_docs = True
+            title = doc.get('title', 'Unknown Source')
+            content = doc.get('content', '').strip()
+            # Standard Format: "- [Title]: Content"
+            doc_parts.append(f"- [{title}]: {content}")
     
-    if not found_docs:
-        context_str = "No external documents found. Rely on internal knowledge."
+    # 3. Handle Fallback & Assembly
+    # -----------------------------
+    if doc_parts:
+        facts_section = "\n".join(doc_parts)
+    else:
+        # This specific string triggers the "NO_CONTEXT" logic in your prompt
+        facts_section = "No relevant documents found."
 
+    # Combine nicely with headers
+    context_blocks = []
+    if qa_section:
+        context_blocks.append(f"### COMPLETED SUB-TASKS:\n{qa_section}")
+    
+    context_blocks.append(f"### GATHERED FACTS:\n{facts_section}")
+    
+    context_str = "\n\n".join(context_blocks)
     # Check the documents
     # print(f" Worker context length: {len(context_str)} characters.")
     # print(f" Worker context preview:\n{context_str[:500]}...\n")
 
     # 2. Prompt
     prompt = f"""
-### ROLE
-You are a strict Question-Answering extraction system. You are NOT a conversational assistant. 
-
-### TASK
-Extract the answer to the Question based on the provided Context.
-
-### CONSTRAINTS
-1. Output Type: Return ONLY the specific entity, name, date, or number requested. 
-2. Grammar: DO NOT use complete sentences. DO NOT say "The answer is...".
-3. Style: Be robotic and concise.
-4. Fallback: If the Context is completely empty or irrelevant, output exactly: "NO_CONTEXT"
+### INSTRUCTION
+Extract the exact answer to the User Question from the Context below.
+Output ONLY the entity (name, date, number). Do not write complete sentences. Be robotic and concise.
 
 ### EXAMPLES
 Question: "What is the capital of France?"
-Bad Answer: "The capital of France is Paris."
-Bad Answer: "It is Paris."
 Good Answer: "Paris"
 
 Question: "Who won the 1996 World Series?"
 Good Answer: "New York Yankees"
 
-### INPUT DATA
-Question: "{query}"
-
+### CURRENT TASK
 Context:
 {context_str}
 
-### YOUR ANSWER
+Question: "{question_text}"
+
+### ANSWER
 """
     
     return worker.generate(prompt).strip()
@@ -176,25 +180,25 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
 
     if known_info is None:
         prompt = f"""
-        Task: Create a concise search query to find information relevant to the Question.
-        Question: "{active_query}"
-        
-        Constraint: Keep it under 10 words. Focus on key terms.
-        
-        Search Query:
+Task: Create a concise search query to find information relevant to the Question.
+Question: "{active_query}"
+
+Constraint: Keep it under 10 words. Focus on key terms.
+
+Search Query:
         """
         
     else:
         prompt = f"""
-        Task: Create a concise search query to find information relevant to the Question.
-        Question: "{active_query}"
-        
-        We have already found these pages:
-        {known_info}
+Task: Create a concise search query to find information relevant to the Question.
+Question: "{active_query}"
 
-        Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
+We have already found these pages:
+{known_info}
+
+Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
         
-        Search Query:
+Search Query:
         """
     
     return worker.generate(prompt).strip()

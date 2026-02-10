@@ -10,6 +10,20 @@ ACTION_DEC_SLM = 7
 ACTION_DEC_LLM = 8
 ACTION_FAIL = 9
 
+# All action IDs for iteration
+ALL_ACTION_IDS = (
+    ACTION_GEN_SLM,
+    ACTION_GEN_LLM,
+    ACTION_RET_KEY,
+    ACTION_RET_VEC,
+    ACTION_GRD_SLM,
+    ACTION_GRD_LLM,
+    ACTION_RWT_SLM,
+    ACTION_DEC_SLM,
+    ACTION_DEC_LLM,
+    ACTION_FAIL,
+)
+
 def get_action_name(action_id: int) -> str:
     mapping = {
         0: "GEN_SLM",

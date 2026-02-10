@@ -45,11 +45,21 @@ class GreenEngine:
         # Deep copy the state to avoid mutating the original
         new_state = copy.deepcopy(state)
 
-        # Identify which subquery that will be influenced by actions the operate on subqueries
-        active_subquery = get_active_subquery(new_state)
-        # Set the new subquery as active
-        if active_subquery is not None:
-            active_subquery["status"] = "ACTIVE"
+        # get_active_subquery is causing problems
+        # trying new method where we get the active subquery index instead of the object itself, then we can update the state directly without worrying about references
+        active_idx = -1
+        active_subquery = None
+        
+        # Iterate backwards to match your stack logic (LIFO/Reversed)
+        # using enumerate to keep track of the REAL index in the main list
+        subqueries = new_state.get('subqueries', [])
+        for i in range(len(subqueries) - 1, -1, -1):
+            if subqueries[i]['status'] in ["ACTIVE", "PENDING"]:
+                active_idx = i
+                active_subquery = subqueries[i]
+                # Side effect: Mark as ACTIVE immediately in the state
+                new_state['subqueries'][i]['status'] = "ACTIVE" 
+                break
 
         # Execute the action using the engine function
         # We don't use the obs or argument for generation
@@ -68,13 +78,20 @@ class GreenEngine:
             trace_logger.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
             trace_logger.debug(f"LLM RESPONDS: {answer}")
 
+            # Check for active subquery using the canonical function (not stale local variable)
+            current_active = get_active_subquery(new_state)
+            
             # If we have an active subquery, we update that
-            if active_subquery:
-                active_subquery['answer'] = answer
-                active_subquery['status'] = "ANSWERED"
+            if current_active:
+                # Find the index of this subquery so we can update it
+                for i, sub in enumerate(new_state['subqueries']):
+                    if sub['id'] == current_active['id']:
+                        new_state['subqueries'][i]['answer'] = answer
+                        new_state['subqueries'][i]['status'] = "ANSWERED"
+                        break
                 obs = f"Sub-query answered: {answer}"
                 logging.debug(f"Updated active subquery with answer: {answer}")
-                trace_logger.debug(f"Sub-query answered:\nQ: {active_subquery['question']}\nA: {answer}")
+                trace_logger.debug(f"Sub-query answered:\nQ: {current_active['question']}\nA: {answer}")
                 trace_logger.debug(f"This is the state of all subqueries after answering:\n" + "\n".join([f"{sub['question']} - {sub['status']}" for sub in new_state['subqueries']]))
                 
                 new_subquery = get_active_subquery(new_state)
@@ -83,11 +100,12 @@ class GreenEngine:
                 trace_logger.debug(f"If we look for active query now we get: {new_q_text}")
 
             else:
-                # Otherwise we update the main query
+                # No active subquery - this is the main answer
                 new_state['answer'] = answer
                 new_state['status'] = "SOLVED"
                 obs = f"Main query answered: {answer}"
                 trace_logger.debug(f"Main query answered: {answer}")
+
 
 
         # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---

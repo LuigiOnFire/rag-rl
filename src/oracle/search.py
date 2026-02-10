@@ -4,7 +4,8 @@ import copy
 import logging
 from typing import List, Optional, Any, Dict, Tuple, TypedDict, NamedTuple
 from src.agent import actions, workers
-from src.env.state import GreenState, create_initial_state, SubQuery, Document, GreenHistoryItem
+from src.env import retriever
+from src.env.state import GreenState, GreenHistoryItem
 from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 from src.env.engine import GreenEngine
@@ -25,13 +26,18 @@ except FileNotFoundError:
 def get_cost(action_id):
     return float(COST_TABLE.get(str(action_id), 1.0))
 
+class OracleInterface:
+    """Common interface to ensure both solvers behave the same way."""
+    def solve(self, state: GreenState, ground_truth: str) -> Tuple[Optional[GreenState], Dict]:
+        raise NotImplementedError
+
 class SearchNode(NamedTuple):
     state: GreenState
     parent: Optional['SearchNode']
     action_item: Optional[GreenHistoryItem]
     # We store the parent link to reconstruct the full pre_state trajectory
 
-class OracleSearch:
+class OracleSearch(OracleInterface):
     def __init__(self, retriever: EphemeralRetriever):
         self.engine = GreenEngine(retriever=retriever)
         self.retriever = retriever
@@ -67,6 +73,7 @@ class OracleSearch:
 
         # 3. MIDDLE OF TURN
         else:
+            # FOR DEBUGGING
             # Base actions always available
             valid = [
                 actions.ACTION_RET_KEY, 
@@ -79,8 +86,8 @@ class OracleSearch:
             # otherwise, what are we grading?
             retrieval_ids = [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]
             
-            if last_action_id in retrieval_ids:
-                valid.append(actions.ACTION_GRD_SLM)
+            # if last_action_id in retrieval_ids:
+            #     valid.append(actions.ACTION_GRD_SLM)
                 
             # LOGIC FIX: Only allow REWRITE if we just GRADED
             # (Optional, but saves energy)
@@ -142,7 +149,7 @@ class OracleSearch:
             # Check Success
             logging.debug(f"Current state status: {current_state['status']}")
             if current_state['status'] == "SOLVED":
-                # We generated a "SOLVED" state.
+                # We generated a "SOLVED" state - this is terminal, don't expand further
                 logging.debug("Entering SOLVED state evaluation.")
                 final_answer = current_state.get('answer')
                 question  = current_state.get('question')
@@ -154,7 +161,6 @@ class OracleSearch:
                 is_correct, reason = self.judge.judge(final_answer, ground_truth, question)
 
                 trace_logger.debug(f"JUDGE LOG -- Q: {question} | A: {final_answer} | GT: {ground_truth} | Correct: {is_correct} | Reason: {reason}")
-
                 
                 if is_correct:
                     # Old Logic would keep looking for cheaper solutions
@@ -167,7 +173,7 @@ class OracleSearch:
                     solution_node = current_node
                     break
                 else: 
-                    # Wrong answer
+                    # Wrong answer - this is a dead end, don't expand
                     logging.debug(f"Wrong answer: {final_answer}, Reason: {reason}")
                     continue
             
@@ -267,4 +273,51 @@ class OracleSearch:
         }
         logging.debug(f"Debug Info: {debug_info}")
         return final_state, debug_info
+
+class WaterfallOracle(OracleInterface):
+    """
+    The previous implementation would attempt to do a shortest path search of the tree
+    to find the most efficient solution was simply too expensive to run, especially in 
+    the case of decompose actions which can generate a large number of new states. 
+    This new implementation will simply follow a fixed policy of actions, without any 
+    backtracking or search. This is a "waterfall" approach, where we go 
+    step by step through a predefined sequence of actions until we reach a solution 
+    or exhaust our options.
+    """
+    def __init__(self, retriever: EphemeralRetriever):
+        self.engine = GreenEngine(retriever=retriever)
+        self.judge = SoftJudge()
+
+    def solve(self, start_state_params: Any, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
+        """
+        Tried a handful of strategies with increasing cost.
+        These strategies are handwritten solutions.
+        I will monitor the performance of these strategies and add more as needed.
+        """
+
+
+        for strategy in self.STRATEGIES:
+            # First, copy the state
+
+            # Then, run through each strategy
+            # The strategies are defined as class variables
+            # After running each streategy, check if the problem was solved
+            # If it was solved, return the solution and the trajectory
+            # If it was not solved, move on to the next strategy
+
+    self.STRATEGIES = [
+        # Strategy 1.1: Try to solve directly with SLM generation
+        [actions.ACTION_GEN_SLM],
+
+        # Strategy 1.2: Same but with LLM generation
+        [actions.ACTION_GEN_LLM],
+
+        # Strategy 2.1: Key search, then generate with SLM
+        [
+            actions.ACTION_RET_KEY, 
+            actions.ACTION_GEN_SLM
+        ],
+
+        # Strategy 
+
 
