@@ -11,7 +11,7 @@ sys.path.append(os.getcwd())
 from src.agent import workers
 from src.env.state import GreenState, create_initial_state
 from src.env.retriever import EphemeralRetriever
-from src.oracle.search import OracleSearch
+from src.oracle.search import OracleSearch, WaterfallOracle
 from src.data.hotpot import HotpotQAStreamer
 
 # Frequency with which to force decomposition
@@ -59,15 +59,15 @@ def main():
         
         # Instantiate Oracle Search
         # Important! This is where we actually initiate the search to sovle the problem
-        oracle_search = OracleSearch(retriever=retriever)
+        oracle_search = WaterfallOracle(retriever=retriever)
         logging.info("Initialized Oracle Search.")        
         # Setup Oracle Search
         start_state = create_initial_state(question)
 
         # Generate some of the trajectories with forcing decomposition first
 
-        if random.random() < FORCE_DECOMP_RATE:            
-            oracle_search.force_decompose = True        
+        # if random.random() < FORCE_DECOMP_RATE:            
+        #     oracle_search.force_decompose = True
 
         # Run Search
         logging.info("Starting Oracle Search...")

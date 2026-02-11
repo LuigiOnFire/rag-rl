@@ -100,7 +100,7 @@ class OracleSearch(OracleInterface):
 
             return valid
 
-    def solve(self, start_state_params: Any, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
+    def solve(self, start_state_params: GreenState, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
         # Adaptation for 02_generate.py compatibility
         logging.debug("Starting OracleSearch.solve()")
         initial_state: GreenState
@@ -108,7 +108,7 @@ class OracleSearch(OracleInterface):
         if isinstance(start_state_params, dict) and "question" in start_state_params:
              # It is already a GreenState dict
              # type ignore used because mypy/pylance struggles with deepcopy of TypedDict vs dict
-             initial_state = copy.deepcopy(start_state_params) # type: ignore
+             initial_state = copy.deepcopy(start_state_params)
         else:
             raise ValueError("start_state_params must be a GreenState dict.")
     
@@ -287,24 +287,51 @@ class WaterfallOracle(OracleInterface):
         self.engine = GreenEngine(retriever=retriever)
         self.judge = SoftJudge()
 
-    def solve(self, start_state_params: Any, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
+    def solve(self, start_state_params: GreenState, ground_truth: str, max_depth=10) -> Tuple[Optional[GreenState], Dict[str, Any]]:
         """
         Tried a handful of strategies with increasing cost.
         These strategies are handwritten solutions.
         I will monitor the performance of these strategies and add more as needed.
         """
-
-
-        for strategy in self.STRATEGIES:
+        if isinstance(start_state_params, dict) and "question" in start_state_params:
+            template_state = copy.deepcopy(start_state_params)
+        else:
+            raise ValueError("start_state_params must be a GreenState dict.")
+        
+        # Then, run through each strategy
+        # The strategies are defined as class variables
+        for strategy_idx, strategy in enumerate(self.STRATEGIES):
+            logging.debug(f"Waterfall: Attempting Strategy {strategy_idx} - {strategy}")
             # First, copy the state
+            
+            current_state = copy.deepcopy(template_state)
 
-            # Then, run through each strategy
-            # The strategies are defined as class variables
-            # After running each streategy, check if the problem was solved
-            # If it was solved, return the solution and the trajectory
-            # If it was not solved, move on to the next strategy
+            for action_id in strategy:
+                # Get the next step from the engine
+                current_state = self.engine.step(current_state, action_id, argument=None)
 
-    self.STRATEGIES = [
+                # Check if solved
+                if current_state['status'] == "SOLVED":
+                    final_answer = current_state.get('answer')
+                    question  = current_state.get('question')
+
+                    if final_answer is None:
+                        continue
+
+                    # After running each streategy, check if the problem was solved
+                    is_correct, reason = self.judge.judge(final_answer, ground_truth, question)
+                    
+                    # If it was solved, return the solution and the trajectory
+                    if is_correct:
+                        return current_state, {"solved": True, "strategy": strategy}
+                    # If it was not solved, move on to the next strategy
+                    else:
+                        break # Move on to the next strategy
+        
+    
+        return None, {"solved": False}
+
+    STRATEGIES = [
         # Strategy 1.1: Try to solve directly with SLM generation
         [actions.ACTION_GEN_SLM],
 
@@ -317,6 +344,101 @@ class WaterfallOracle(OracleInterface):
             actions.ACTION_GEN_SLM
         ],
 
-        # Strategy 
+        # Strategy 2.2: Key search, then generate with LLM
+        [
+            actions.ACTION_RET_KEY, 
+            actions.ACTION_GEN_LLM
+        ],
 
+        # Strategy 2.3 Vector search, then generate with SLM
+        [
+            actions.ACTION_RET_VEC, 
+            actions.ACTION_GEN_SLM
+        ],
 
+        # Strategy 2.4 Vector search, then generate with LLM
+        [
+            actions.ACTION_RET_VEC, 
+            actions.ACTION_GEN_LLM
+        ],
+
+        # Strategy 3.1: Decompose with SLM, then generate with SLM
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_GEN_SLM,
+        ],
+
+        # Strategy 3.2: Decompose with SLM, then generate with LLM
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_GEN_LLM,
+        ],
+
+        # Strategy 4.1: Decompose with SLM, then retrieve with keyword and generate with SLM for each subproblem
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
+        ],
+
+        # Strategy 4.2: Decompose with SLM, then retrieve with keyword and generate with LLM for each subproblem
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_LLM,
+        ],
+
+        # Strategy 4.3: Decompose with SLM, then retrieve with vector and generate with SLM for each subproblem
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_SLM,
+        ],
+
+        # Strategy 4.4: Decompose with SLM, then retrieve with vector and generate with LLM for each subproblem
+        [
+            actions.ACTION_DEC_SLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
+        ],
+    ]

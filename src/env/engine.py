@@ -114,6 +114,11 @@ class GreenEngine:
             # For now we use an SLM for keyword, LLM for vector
             # SLM is faster and cheaper for simple keyword generation
             # LLM is better at semantic understanding
+            
+            # If both retrievals use the SLM, the costs are:
+            # RET_KEY: 127.5712 Joules (avg)
+            # RET_VEC 189.2028 Joules (avg)
+            # Accordingly we use SLM for keyword and LLM for vector to maintain the intuition of "keyword retrieval is cheaper but less powerful, vector retrieval is more expensive but more powerful"
             if action_id == actions.ACTION_RET_KEY:
                 argument = workers.generate_query_for_keyword_search(new_state, use_llm=False)
                 raw_docs = self.retriever.search_bm25(argument)
