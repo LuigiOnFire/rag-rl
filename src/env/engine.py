@@ -106,8 +106,6 @@ class GreenEngine:
                 obs = f"Main query answered: {answer}"
                 trace_logger.debug(f"Main query answered: {answer}")
 
-
-
         # --- [2] or [3]: RETRIEVAL (RET_KEY / RET_VEC) ---
         # This will do for now but I'd like the model to know whether the it's doing
         # a keyword or vector search

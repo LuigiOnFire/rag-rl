@@ -4,7 +4,6 @@ import copy
 import logging
 from typing import List, Optional, Any, Dict, Tuple, TypedDict, NamedTuple
 from src.agent import actions, workers
-from src.env import retriever
 from src.env.state import GreenState, GreenHistoryItem
 from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
