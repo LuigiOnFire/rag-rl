@@ -96,22 +96,21 @@ class SoftJudge:
         logger.info("JUDGE: Tier 1 & 2 Failed. Escalating to LLM Judge...")
         
         prompt = f"""
-        You are a strict, impartial judge avoiding false positives.
-        
-        Task: Determine if the Prediction correctly answers the Question based on the Ground Truth.
+You are a strict, impartial judge. 
+Task: Validate if the Prediction is equivalent to the Ground Truth.
 
-        Question: "{question}"        
-        Ground Truth: "{ground_truth}"
-        Prediction: "{prediction}"
+STRICT RULES:
+1. **Core Match**: The Prediction must contain the specific entity (name, date, or number) from the Ground Truth.
+2. **No Hallucinations**: If the Prediction contains *additional* specific details (dates, numbers, names) that are NOT in the Ground Truth, mark it INCORRECT.
+3. **No Fluff**: Repeating the question or giving vague non-answers is INCORRECT.
 
-        Instructions:
-        1. Does the Prediction constitute the same answer to the Question as the Ground Truth?
-        2. Ignore minor wording differences or verbosity ("the capital of France is Paris" vs "Paris").
-        3. If the prediction contains the correct answer but repeats the question, it should be marked as incorrect.
+First, explain your reasoning in one short sentence.
+Then, output "Verdict: YES" or "Verdict: NO".
 
-        First, briefly explain your reasoning in one sentence.
-        Then, output the final verdict as "Verdict: YES" or "Verdict: NO".
-        """
+Question: "{question}"        
+Ground Truth: "{ground_truth}"
+Prediction: "{prediction}"
+"""
         
         try:
             response = llm_worker.generate(prompt)

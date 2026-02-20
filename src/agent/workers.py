@@ -138,6 +138,7 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 ### INSTRUCTION
 Extract the exact answer to the User Question from the Context below.
 Output ONLY the entity (name, date, number). Do not write complete sentences. Be robotic and concise.
+Do not list facts. Compare the facts and output ONLY the final winning entity."
 
 ### EXAMPLES
 Question: "What is the capital of France?"
@@ -226,25 +227,25 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
 
     if known_info is None:
         prompt = f"""
-    Task: Create a query for a vector search to find information relevant to the Question.
-    Question: "{active_query}"
-    
-    Constraint: Keep it under 10 words. Focus on key terms.
-    
-    Search Query:
+Task: Create a query for a vector search to find information relevant to the Question.
+Question: "{active_query}"
+
+Constraint: Keep it under 10 words. Focus on key terms.
+
+Search Query:
     """
         
     else:
         prompt = f"""
-    Task: Create a query for a vector search to find information relevant to the Question.
-    Question: "{active_query}"
-    
-    We have already found these pages:
-    {known_info}
+Task: Create a query for a vector search to find information relevant to the Question.
+Question: "{active_query}"
 
-    Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
-    
-    Search Query:
+We have already found these pages:
+{known_info}
+
+Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
+
+Search Query:
     """
     
     return worker.generate(prompt).strip()
@@ -263,13 +264,13 @@ def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> s
     worker = llm_worker if use_llm else slm_worker
     
     prompt = f"""
-    Task: Check if the Document contains information relevant to the Question.
-    Question: "{active_query}"
-    
-    Document:
-    "{doc_text[:2000]}" ... (truncated)
-    
-    Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
+Task: Check if the Document contains information relevant to the Question.
+Question: "{active_query}"
+
+Document:
+"{doc_text[:2000]}" ... (truncated)
+
+Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
     """
     
     result = worker.generate(prompt).strip().lower()
@@ -332,12 +333,12 @@ def generate_plan(state: GreenState, use_llm: bool = False) -> str:
 
     
     prompt = f"""
-    Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
-    Constraint: Return ONLY the numbered list. No intro, no filler.
+Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
+Constraint: Return ONLY the numbered list. No intro, no filler.
+
+Main Question: "{question}"
     
-    Main Question: "{question}"
-        
-    Plan:
+Plan:
     """
     
     # 2. Generate

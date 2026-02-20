@@ -205,7 +205,7 @@ class OracleSearch(OracleInterface):
                     last_step = new_state['history'][-1]
                     step_cost = last_step['cost']        
 
-                    tiebreaker += 1           
+                    tiebreaker += 1
 
                     # Create our search node
                     new_node = SearchNode(
@@ -302,11 +302,16 @@ class WaterfallOracle(OracleInterface):
         # The strategies are defined as class variables
         for strategy_idx, strategy in enumerate(self.STRATEGIES):
             logging.debug(f"Waterfall: Attempting Strategy {strategy_idx} - {strategy}")
-            # First, copy the state
             
+            # First, copy the state
             current_state = copy.deepcopy(template_state)
 
+            pre_states= []
+
             for action_id in strategy:
+                # Capture the satate before the action for SFT trajectory
+                pre_states.append(copy.deepcopy(current_state))
+
                 # Get the next step from the engine
                 current_state = self.engine.step(current_state, action_id, argument=None)
 
@@ -323,14 +328,47 @@ class WaterfallOracle(OracleInterface):
                     
                     # If it was solved, return the solution and the trajectory
                     if is_correct:
-                        return current_state, {"solved": True, "strategy": strategy}
-                    # If it was not solved, move on to the next strategy
+                        # build the SFT trajectory for this successful strategy
+                        sft_trajectory = self._build_trajectory(pre_states, current_state['history'])
+
+                        return current_state, {"solved": True, 
+                                               "strategy": strategy,
+                                               "sft_trajectory": sft_trajectory,
+                                               }
                     else:
+                        # If it was not solved, move on to the next strategy
                         break # Move on to the next strategy
         
     
-        return None, {"solved": False}
-
+        return None, {"solved": False, "sft_trajectory": []}
+    
+    def _build_trajectory(self, pre_states: List[GreenState], history: List[GreenHistoryItem]) -> List[Dict]:
+        """
+        Zips the pre_states with the resulting history items to create training examples.
+        """
+        sft_trajectory = []
+        
+        # Ensure they align (they should, unless the engine failed to append to history)
+        limit = min(len(pre_states), len(history))
+        
+        for i in range(limit):
+            pre_state = pre_states[i]
+            act = history[i]
+            
+            # Remove ground truth to prevent data leakage in training, just like OracleSearch did
+            if 'ground_truth' in pre_state:
+                del pre_state['ground_truth']
+                
+            sft_trajectory.append({
+                "step_id": i,
+                "pre_state": pre_state, 
+                "action_id": act['action_id'],
+                "argument": act['argument'],
+                "observation": act['observation']
+            })
+            
+        return sft_trajectory
+    
     STRATEGIES = [
         # Strategy 1.1: Try to solve directly with SLM generation
         [actions.ACTION_GEN_SLM],
