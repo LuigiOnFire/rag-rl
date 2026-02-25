@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 
 from src.agent.workers import llm_worker
 
-USE_LLM_JUDGE = True
+USE_LLM_JUDGE = False
 
 logger = logging.getLogger(__name__)
 

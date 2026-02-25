@@ -25,7 +25,12 @@ class LLMWorker:
         messages.append({'role': 'user', 'content': prompt})
         
         try:
-            response = ollama.chat(model=self.model_name, messages=messages)
+            # Add options={"temperature": 0.0} to lock the model to greedy decoding
+            response = ollama.chat(
+                model=self.model_name, 
+                messages=messages,
+                options={"temperature": 0.0} 
+            )
             response_text = response['message']['content']
             # Log the interaction
             # We capture exactly what went in and what came out

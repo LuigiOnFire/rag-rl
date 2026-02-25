@@ -21,3 +21,5 @@ __pycache__/
 # Generated artifacts (optional - keep if you want to track starter data, ignore if large)
 data/
 models/
+wandb/
+logs/
