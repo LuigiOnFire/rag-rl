@@ -28,7 +28,7 @@ class GreenState(TypedDict):
     total_joules: float
     documents: List[Document]    # The raw search hits
     answer: Optional[str]        # The final answer, once solved
-
+    prev_searches: List[str]  # The raw search queries made, for reference and potential reuse in subqueries
 
     # 2. The Brain (Reasoning Traces)
     scratchpad: str  # e.g., "I need to check X because Y failed..."
@@ -55,6 +55,7 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
         "history": [],
         "documents": [],
         "answer": None,
+        "prev_searches": [],
         # "judge_log": None
     }
 

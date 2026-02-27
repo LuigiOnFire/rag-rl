@@ -34,7 +34,7 @@ def main():
     
     # Initialize Streamer
     active_datasets = ["hotpot"]
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=100)    
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=5)    
     print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
           f"from: {', '.join(active_datasets)}")
 

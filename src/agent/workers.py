@@ -168,45 +168,51 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
     Look at the state and output a search string.
     Does NOT connect to any database.
     """
-    active_sub = get_active_subquery(state)
-
-    if active_sub is not None:
-        active_query = active_sub['question']
-    else:
-        active_query = state['question']
-
-    known_info = None
-    if "documents" in active_query and active_sub is not None:
-        known_info = "\n".join([f"- {d['title']} : {d['content'][:100]}..." for d in active_sub['documents']])
-
-    if use_llm:
-        worker = llm_worker
-    else:
-        worker = slm_worker
-
-    if known_info is None:
-        prompt = f"""
-Task: Create a concise search query to find information relevant to the Question.
-Question: "{active_query}"
-
-Constraint: Keep it under 10 words. Focus on key terms.
-
-Search Query:
-        """
-        
-    else:
-        prompt = f"""
-Task: Create a concise search query to find information relevant to the Question.
-Question: "{active_query}"
-
-We have already found these pages:
-{known_info}
-
-Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
-        
-Search Query:
-        """
+    worker = llm_worker if use_llm else slm_worker
     
+    # 1. Determine the active question
+    active_sub = get_active_subquery(state)
+    active_query = active_sub['question'] if active_sub is not None else state['question']
+
+    # 2. Format Known Information (Targeting the correct document list)
+    target_docs = active_sub['documents'] if active_sub is not None else state.get('documents', [])
+    known_info_str = ""
+    
+    if target_docs:
+        doc_titles = "\n".join([f"- {d.get('title')}..." for d in target_docs])
+        known_info_str = f"We have already found these pages:\n{doc_titles}\n"
+
+    # 3. Format Previous Searches (The Taboo List)
+    prev_searches_str = ""
+    prev_searches = state.get('prev_searches', [])
+    
+    if prev_searches:
+        search_bullets = "\n".join([f"- {s}" for s in prev_searches])
+        prev_searches_str = (
+            f"Previous searches we already tried (DO NOT REPEAT THESE):\n"
+            f"{search_bullets}\n"
+        )
+
+    # 4. Build Dynamic Constraints
+    constraints = ["Keep it under 10 words.", "Focus on key terms."]
+    if known_info_str:
+        constraints.append("Do not search for concepts already covered by the pages found.")
+    if prev_searches_str:
+        constraints.append("You MUST try a new semantic angle or completely different keywords.")
+        
+    constraint_text = " ".join(constraints)
+
+    # 5. Final Master Prompt
+    prompt = f"""
+Task: Create a query for a keyword search to find information relevant to the Question.
+Question: "{active_query}"
+
+{known_info_str}
+{prev_searches_str}
+Constraint: {constraint_text}
+
+Search Query:
+"""
     return worker.generate(prompt).strip()
 
 def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -> str:
@@ -214,45 +220,51 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     Look at the state and output a search string.
     Does NOT connect to any database.
     """
-    active_sub = get_active_subquery(state)
-
-    if active_sub is not None:
-        active_query = active_sub['question']
-    else:
-        active_query = state['question']
-
-    known_info = None
-    if "documents" in active_query and active_sub is not None:
-        known_info = "\n".join([f"- {d['title']} : {d['content'][:100]}..." for d in active_sub['documents']])
-
-    if use_llm:
-        worker = llm_worker
-    else:
-        worker = slm_worker
-
-    if known_info is None:
-        prompt = f"""
-Task: Create a query for a vector search to find information relevant to the Question.
-Question: "{active_query}"
-
-Constraint: Keep it under 10 words. Focus on key terms.
-
-Search Query:
-    """
-        
-    else:
-        prompt = f"""
-Task: Create a query for a vector search to find information relevant to the Question.
-Question: "{active_query}"
-
-We have already found these pages:
-{known_info}
-
-Constraint: Keep it under 10 words. Focus on key terms not already covered by Known Information.
-
-Search Query:
-    """
+    worker = llm_worker if use_llm else slm_worker
     
+    # 1. Determine the active question
+    active_sub = get_active_subquery(state)
+    active_query = active_sub['question'] if active_sub is not None else state['question']
+
+    # 2. Format Known Information (Targeting the correct document list)
+    target_docs = active_sub['documents'] if active_sub is not None else state.get('documents', [])
+    known_info_str = ""
+    
+    if target_docs:
+        doc_titles = "\n".join([f"- {d.get('title')}..." for d in target_docs])
+        known_info_str = f"We have already found these pages:\n{doc_titles}\n"
+
+    # 3. Format Previous Searches (The Taboo List)
+    prev_searches_str = ""
+    prev_searches = state.get('prev_searches', [])
+    
+    if prev_searches:
+        search_bullets = "\n".join([f"- {s}" for s in prev_searches])
+        prev_searches_str = (
+            f"Previous searches we already tried (DO NOT REPEAT THESE):\n"
+            f"{search_bullets}\n"
+        )
+
+    # 4. Build Dynamic Constraints
+    constraints = ["Keep it under 10 words.", "Focus on key terms."]
+    if known_info_str:
+        constraints.append("Do not search for concepts already covered by the pages found.")
+    if prev_searches_str:
+        constraints.append("You MUST try a new semantic angle or completely different keywords.")
+        
+    constraint_text = " ".join(constraints)
+
+    # 5. Final Master Prompt
+    prompt = f"""
+Task: Create a query for a vector search to find information relevant to the Question.
+Question: "{active_query}"
+
+{known_info_str}
+{prev_searches_str}
+Constraint: {constraint_text}
+
+Search Query:
+"""
     return worker.generate(prompt).strip()
     
 def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> str:

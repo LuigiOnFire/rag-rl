@@ -125,6 +125,9 @@ class GreenEngine:
             else:
                 argument = workers.generate_query_for_vector_search(new_state, use_llm=True)
                 raw_docs = self.retriever.search_dense(argument)
+
+            # Update prev_searches in new_state
+            new_state['prev_searches'].append(argument)
             
             # Format & Update State
             formatted_docs = self._format_docs(raw_docs)
@@ -140,7 +143,7 @@ class GreenEngine:
         # Grade the documents in the active subquery
         # Not checked, may not work
             count_rel = 0
-            target_docs = active_subquery['documents'] if active_subquery is not None else state.get('documents', [])
+            target_docs = active_subquery['documents'] if active_subquery is not None else new_state.get('documents', [])
 
             if not target_docs:
                 obs = "No documents to grade."

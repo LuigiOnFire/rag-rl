@@ -22,8 +22,28 @@ except FileNotFoundError:
     logging.warning("cost_table.json not found. Using default costs (1.0).")
     COST_TABLE = {}
 
-def get_cost(action_id):
+def get_cost(action_id: int) -> float:
     return float(COST_TABLE.get(str(action_id), 1.0))
+
+# Average number of subqueries assumed for decompose strategies when ranking cost.
+# Tune this to match your typical multi-hop question depth.
+AVG_DECOMPOSE_SUBQUERIES = 3
+
+def strategy_cost(strategy: list) -> float:
+    """
+    Estimate the total expected Joule cost for a WaterfallOracle strategy.
+    
+    - int entries: a single action at its calibrated cost.
+    - tuple entries: a repeat block executed once per subquery, so the cost
+      of the tuple body is multiplied by AVG_DECOMPOSE_SUBQUERIES.
+    """
+    total = 0.0
+    for entry in strategy:
+        if isinstance(entry, tuple):
+            total += AVG_DECOMPOSE_SUBQUERIES * sum(get_cost(a) for a in entry)
+        else:
+            total += get_cost(entry)
+    return total
 
 class OracleInterface:
     """Common interface to ensure both solvers behave the same way."""
@@ -456,4 +476,67 @@ class WaterfallOracle(OracleInterface):
             (actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM),  # repeat until no active subquery
             actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
+        # Strategy 5.1: Key search, Grade (SLM), Generate (SLM)
+        [
+            actions.ACTION_RET_KEY, 
+            actions.ACTION_GRD_SLM,
+            actions.ACTION_GEN_SLM
+        ],
+
+        # Strategy 5.2: Vector search, Grade (LLM), Generate (LLM)
+        [
+            actions.ACTION_RET_VEC, 
+            actions.ACTION_GRD_LLM,
+            actions.ACTION_GEN_LLM
+        ],
+        # Strategy 6.1: Decompose, Retrieve, Grade (SLM), Answer (SLM) for each subtask
+        [
+            actions.ACTION_DEC_SLM,
+            (actions.ACTION_RET_KEY, actions.ACTION_GRD_SLM, actions.ACTION_GEN_SLM), 
+            actions.ACTION_GEN_SLM,     # Final synthesis
+        ],
+
+        # Strategy 6.2: Decompose, Retrieve, Grade (LLM), Answer (LLM) for each subtask
+        [
+            actions.ACTION_DEC_SLM,
+            (actions.ACTION_RET_VEC, actions.ACTION_GRD_LLM, actions.ACTION_GEN_LLM), 
+            actions.ACTION_GEN_LLM,     # Final synthesis
+        ],
+        # Strategy 7.1: Decompose, then for each subtask: Rewrite -> Retrieve -> Grade -> Answer
+        [
+            actions.ACTION_DEC_SLM,
+            (actions.ACTION_RWT_SLM, actions.ACTION_RET_KEY, actions.ACTION_GRD_SLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_LLM,     # Final synthesis (using heavy model to tie it all together)
+        ],
+        
+        # Strategy 7.2: Same as 7.1 but using Vector search and LLM grading
+        [
+            actions.ACTION_DEC_SLM,
+            (actions.ACTION_RWT_SLM, actions.ACTION_RET_VEC, actions.ACTION_GRD_LLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_LLM,     
+        ],
+        # Strategy 8.1: Search -> Grade -> Rewrite -> Search -> Grade -> Answer
+        [
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GRD_SLM,
+            actions.ACTION_RWT_SLM,     # "Slate cleared"
+            actions.ACTION_RET_VEC,     # Try a different search method
+            actions.ACTION_GRD_SLM,
+            actions.ACTION_GEN_LLM
+        ],
     ]
+
+
+# Sort strategies cheapest-first using calibrated (or default) action costs.
+# This ensures WaterfallOracle always tries the lowest-energy path before
+# escalating to more expensive ones.
+# Re-run src/oracle/calibrator.py to refresh cost_table.json whenever the
+# model or hardware changes.
+WaterfallOracle.STRATEGIES.sort(key=strategy_cost)
+logging.debug(
+    "WaterfallOracle strategy order (cheapest → most expensive):\n"
+    + "\n".join(
+        f"  [{i}] {round(strategy_cost(s), 4)} J  {s}"
+        for i, s in enumerate(WaterfallOracle.STRATEGIES)
+    )
+)
