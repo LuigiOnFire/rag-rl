@@ -140,16 +140,21 @@ class GreenEngine:
         # Grade the documents in the active subquery
         # Not checked, may not work
             count_rel = 0
-            if active_subquery is not None:
-                logging.debug(f"Grading documents for active subquery: {active_subquery['question']}")
-                for doc in active_subquery['documents']:
-                        use_llm = (action_id == actions.ACTION_GRD_LLM)
-                        grade = workers.generate_grade(state, doc['content'], use_llm=use_llm)                        
-                        doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
-                        if grade == "Relevant": count_rel += 1
+            target_docs = active_subquery['documents'] if active_subquery is not None else state.get('documents', [])
+
+            if not target_docs:
+                obs = "No documents to grade."
+            else:
+                logging.debug(f"Grading {len(target_docs)} documents for relevance.")
+                use_llm = (action_id == actions.ACTION_GRD_LLM)
+                
+                for doc in target_docs:
+                    grade = workers.generate_grade(new_state, doc["content"], use_llm=use_llm)
+                    doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
+                    if grade == "Relevant": count_rel += 1
 
                 relevant_indices = []
-                for i, doc in enumerate(active_subquery['documents']):
+                for i, doc in enumerate(target_docs):
                     if doc.get('relevance') == "RELEVANT":
                         relevant_indices.append(f"Doc {i+1} ({doc['title']})")
                         
@@ -158,18 +163,21 @@ class GreenEngine:
                 else:
                     obs = "Graded docs. None found relevant."
 
-        # [6]: REWRITE (RWT_SLM)
+       # [6]: REWRITE (RWT_SLM)
         elif action_id == actions.ACTION_RWT_SLM:           
-            active_subquery = get_active_subquery(new_state)
-
             if active_subquery is not None:
-                active_subquery["status"] = "ACTIVE"
-
-            if active_subquery is not None:
-                active_subquery["answer"] = workers.generate_rewrite(new_state)
-                obs = f"Rewrote sub-query answer to: {active_subquery['answer']}"
+                old_query = active_subquery.get("question", "")
+                
+                # Generate the new, specific question using past answers
+                new_query = workers.generate_rewrite(new_state)
+                
+                if new_query and new_query.lower() != old_query.lower():
+                    active_subquery["question"] = new_query
+                    obs = f"Rewrote pending sub-query to: '{new_query}'"
+                else:
+                    obs = "Rewrite deemed unnecessary or failed. Kept original query."
             else:
-                obs = "No active sub-query to rewrite."
+                obs = "Action failed. No active sub-query to rewrite."
 
         # [7] or [8]: DECOMPOSITION (DEC_SLM / DEC_LLM)
         elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:

@@ -12,7 +12,7 @@ from src.agent import workers
 from src.env.state import GreenState, create_initial_state
 from src.env.retriever import EphemeralRetriever
 from src.oracle.search import OracleSearch, WaterfallOracle
-from src.data.hotpot import HotpotQAStreamer
+from src.data.loader import MixedStreamer
 
 # Frequency with which to force decomposition
 FORCE_DECOMP_RATE = 1
@@ -33,14 +33,17 @@ def main():
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
     
     # Initialize Streamer
-    streamer = HotpotQAStreamer()
-    
+    active_datasets = ["hotpot"]
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=100)    
+    print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
+          f"from: {', '.join(active_datasets)}")
+
     # Results Container
     # trajectories = [] # Removed in favor of continuous file writing
     
     # Process Stream
+    total = streamer.n_limit
     count = 0
-    streamer = HotpotQAStreamer(limit=50) # Start small
     for sample in streamer.stream():
         # Setup Retriever
         # ... run search ...    
@@ -51,7 +54,7 @@ def main():
         workers.configure_worker_logging(log_file)
 
         
-        print(f"\n[{count+1}] Processing: {question}")
+        print(f"\n[{count+1}/{total}] Processing: {question}")
         
         # Instantiate Ephemeral Retriever with specific corpus
         corpus = sample["corpus"]

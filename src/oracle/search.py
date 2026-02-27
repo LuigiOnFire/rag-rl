@@ -309,11 +309,26 @@ class WaterfallOracle(OracleInterface):
             pre_states= []
 
             for action_id in strategy:
-                # Capture the satate before the action for SFT trajectory
-                pre_states.append(copy.deepcopy(current_state))
-
-                # Get the next step from the engine
-                current_state = self.engine.step(current_state, action_id, argument=None)
+                # ── Repeat block: tuple means "loop until no active subquery" ──
+                # e.g. (ACTION_RET_KEY, ACTION_GEN_SLM) will keep cycling
+                # through those actions until get_active_subquery() returns None.
+                if isinstance(action_id, tuple):
+                    from src.env.state import get_active_subquery
+                    repeat_actions = action_id
+                    while get_active_subquery(current_state) is not None:
+                        for sub_action in repeat_actions:
+                            pre_states.append(copy.deepcopy(current_state))
+                            current_state = self.engine.step(current_state, sub_action, argument=None)
+                            if current_state['status'] in ("SOLVED", "FAILED"):
+                                break
+                        if current_state['status'] in ("SOLVED", "FAILED"):
+                            break
+                    # After the loop, fall through to the SOLVED check below
+                    # by treating it as a no-op single step (skip the normal step)
+                else:
+                    # Normal single action
+                    pre_states.append(copy.deepcopy(current_state))
+                    current_state = self.engine.step(current_state, action_id, argument=None)
 
                 # Check if solved
                 if current_state['status'] == "SOLVED":
@@ -403,80 +418,42 @@ class WaterfallOracle(OracleInterface):
         # Strategy 3.1: Decompose with SLM, then generate with SLM
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_GEN_SLM,
+            (actions.ACTION_GEN_SLM,),  # repeat until no active subquery
+            actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
         # Strategy 3.2: Decompose with SLM, then generate with LLM
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_GEN_LLM,
+            (actions.ACTION_GEN_LLM,),  # repeat until no active subquery
+            actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
 
         # Strategy 4.1: Decompose with SLM, then retrieve with keyword and generate with SLM for each subproblem
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
+            (actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM),  # repeat until no active subquery
+            actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
         # Strategy 4.2: Decompose with SLM, then retrieve with keyword and generate with LLM for each subproblem
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_LLM,
+            (actions.ACTION_RET_KEY, actions.ACTION_GEN_LLM),  # repeat until no active subquery
+            actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
 
         # Strategy 4.3: Decompose with SLM, then retrieve with vector and generate with SLM for each subproblem
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_SLM,
+            (actions.ACTION_RET_VEC, actions.ACTION_GEN_SLM),  # repeat until no active subquery
+            actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
         # Strategy 4.4: Decompose with SLM, then retrieve with vector and generate with LLM for each subproblem
         [
             actions.ACTION_DEC_SLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_LLM,
-            actions.ACTION_RET_VEC,
-            actions.ACTION_GEN_LLM,
+            (actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM),  # repeat until no active subquery
+            actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
     ]

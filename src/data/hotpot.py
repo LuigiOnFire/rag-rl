@@ -27,6 +27,7 @@ class HotpotQAStreamer(BaseStreamer):
             # This is ideal for our "Ephemeral Index" strategy.
             logger.info(f"Loading HotpotQA (distractor) split='{split}'...")
             self.dataset = load_dataset("hotpot_qa", "distractor", split=split) # NOTE: I removed trust_remote_code=True due to a hugging face error.
+            self.total_size: int = len(self.dataset)  # full dataset size before any limit
             
             if self.limit:
                 logger.info(f"Limiting dataset to first {self.limit} samples.")

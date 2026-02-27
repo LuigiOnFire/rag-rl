@@ -281,20 +281,6 @@ Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
     result = worker.generate(prompt).strip().lower()
     return "Relevant" if "relevant" in result else "Irrelevant"
 
-def generate_rewrite(state: GreenState) -> str:
-    # Not strictly used in new flow as described, but good to keep hook.
-    active_sub = get_active_subquery(state)
-
-    if active_sub is None:
-        return ""
-
-    prompt = f"""
-    Refine this query: {active_sub['question']}
-    Based on recent history: {state['history'][-3:]}
-    Output ONLY the rewritten query.
-    """
-    return slm_worker.generate(prompt).strip()
-
 def _format_history(history: List[Any]) -> str:
     """Formats the conversation history for the worker context."""
     out = []
@@ -304,6 +290,33 @@ def _format_history(history: List[Any]) -> str:
         obs = h.get('observation', '')
         out.append(f"Action: {name} -> Obs: {obs}")
     return "\n".join(out)
+
+def generate_rewrite(state: GreenState) -> str:
+        active_sub = get_active_subquery(state)
+        if active_sub is None:
+            return ""
+
+        # Gather the answers we already know
+        resolved_context = []
+        for i, sq in enumerate(state.get('subqueries', [])):
+            if sq.get('status') == "ANSWERED" and sq.get('answer'):
+                resolved_context.append(f"- {sq['question']} -> {sq['answer']}")
+        
+        context_str = "\n".join(resolved_context) if resolved_context else "None"
+
+        prompt = f"""
+    Task: Rewrite the Target Query to be highly specific by injecting information from the Resolved Queries.
+    
+    Resolved Queries:
+    {context_str}
+
+    Target Query to Rewrite: "{active_sub['question']}"
+    
+    Constraint: Output ONLY the rewritten query. Do not answer it. If no rewrite is needed, output the original Target Query.
+    
+    Rewritten Query:"""
+        
+        return slm_worker.generate(prompt).strip()
 
 def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     """
