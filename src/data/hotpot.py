@@ -2,11 +2,13 @@ import logging
 from typing import List, Dict, Generator, Any, Optional
 from datasets import load_dataset, Dataset
 
+from .base import BaseStreamer
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class HotpotQAStreamer:
+class HotpotQAStreamer(BaseStreamer):
     """
     Streams the HotpotQA dataset (Distractor setting) for the GreenRAG Oracle.
     """
