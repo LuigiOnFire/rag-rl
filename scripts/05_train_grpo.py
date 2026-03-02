@@ -49,7 +49,7 @@ from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_t
 
 sys.path.append(os.getcwd())
 
-from src.data.hotpot import HotpotQAStreamer
+from src.data.loader import MixedStreamer
 from src.env.state import GreenState, create_initial_state
 from src.env.retriever import EphemeralRetriever
 from src.env.engine import GreenEngine
@@ -81,6 +81,9 @@ CLIP_EPS             = 0.2    # ε — PPO-style clipping (applied inside GRPO l
 FORMAT_CONSOLATION_REWARD = 0.1   # Reward for valid format but wrong answer
 JOULE_PENALTY_SCALE       = 0.05  # Multiply total_joules by this to get the penalty
 MAX_JOULE_PENALTY         = 0.0   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
+
+# Dataset config
+MAX_QUESTIONS = 150   # Cap on how many examples to draw from the dataset (None = unlimited)
 
 # Checkpoint / logging
 SAVE_EVERY    = 100
@@ -295,10 +298,13 @@ def rollout_one_trajectory(
 
 
 # Action-ID groupings for dashboard metrics
-_PARAMETRIC_IDS = {actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM}
+_SEARCH_IDS = {actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM}
 _KEYWORD_IDS    = {actions.ACTION_RET_KEY}
 _DENSE_IDS      = {actions.ACTION_RET_VEC}
 _DECOMPOSE_IDS  = {actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM}
+_VERIFY_IDS     = {actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM}
+_REWRITE_IDS     = {actions.ACTION_RWT_SLM}
+
 
 
 def rollout_batch(
@@ -330,7 +336,7 @@ def rollout_batch(
 
     # Action-use counters across the whole group
     action_totals: Dict[str, int] = {
-        "parametric": 0, "keyword": 0, "dense": 0, "decompose": 0, "other": 0
+        "search": 0, "keyword": 0, "dense": 0, "decompose": 0, "verify": 0, "rewrite": 0, "other": 0
     }
 
     for gen_idx in range(NUM_GENERATIONS):
@@ -355,14 +361,18 @@ def rollout_batch(
         history = final_state.get("history", []) if final_state else []
         for item in history:
             aid = item.get("action_id", -1)
-            if aid in _PARAMETRIC_IDS:
-                action_totals["parametric"] += 1
+            if aid in _SEARCH_IDS:
+                action_totals["search"] += 1
             elif aid in _KEYWORD_IDS:
                 action_totals["keyword"] += 1
             elif aid in _DENSE_IDS:
                 action_totals["dense"] += 1
             elif aid in _DECOMPOSE_IDS:
                 action_totals["decompose"] += 1
+            elif aid in _VERIFY_IDS:
+                action_totals["verify"] += 1
+            elif aid in _REWRITE_IDS:
+                action_totals["rewrite"] += 1
             else:
                 action_totals["other"] += 1
 
@@ -380,10 +390,12 @@ def rollout_batch(
         "reward/max":           max(rewards),
         "accuracy/mean":        sum(correct_flags) / len(correct_flags),
         "cost/mean_joules":     sum(joules_list) / len(joules_list),
-        "tool_pct/parametric":  action_totals["parametric"] / total_actions,
+        "tool_pct/search":      action_totals["search"] / total_actions,
         "tool_pct/keyword":     action_totals["keyword"]    / total_actions,
         "tool_pct/dense":       action_totals["dense"]      / total_actions,
         "tool_pct/decompose":   action_totals["decompose"]  / total_actions,
+        "tool_pct/verify":      action_totals["verify"]     / total_actions,
+        "tool_pct/rewrite":     action_totals["rewrite"]    / total_actions,
     }
 
     return trajectories, rewards, final_states, metrics
@@ -647,8 +659,10 @@ def main():
     )
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
-    logger.info("Streaming HotpotQA training split ...")
-    streamer  = HotpotQAStreamer(split="train", limit=None)
+    active_datasets = ["hotpot"]
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=MAX_QUESTIONS)
+    print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
+          f"from: {', '.join(active_datasets)}")
     data_iter = streamer.stream()
 
     device = next(model.parameters()).device
@@ -687,10 +701,11 @@ def main():
                 f"  Rewards: {[f'{r:.3f}' for r in rewards]}  mean={mean_r:.3f}  "
                 f"accuracy={batch_metrics['accuracy/mean']:.2f}  "
                 f"joules={batch_metrics['cost/mean_joules']:.3f}  "
-                f"tool% param={batch_metrics['tool_pct/parametric']:.2f} "
+                f"tool% search={batch_metrics['tool_pct/search']:.2f} "
                 f"kw={batch_metrics['tool_pct/keyword']:.2f} "
                 f"dense={batch_metrics['tool_pct/dense']:.2f} "
-                f"dec={batch_metrics['tool_pct/decompose']:.2f}"
+                f"verify={batch_metrics['tool_pct/verify']:.2f} "
+                f"rewrite={batch_metrics['tool_pct/rewrite']:.2f}"
             )
 
             # ── Dashboard logging ────────────────────────────────────────────

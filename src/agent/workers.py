@@ -203,8 +203,10 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
     constraint_text = " ".join(constraints)
 
     # 5. Final Master Prompt
+    # Had some trouble with models doing SQL or code generation, so I modified the promt.
     prompt = f"""
 Task: Create a query for a keyword search to find information relevant to the Question.
+Do NOT write SQL. Do NOT write code.
 Question: "{active_query}"
 
 {known_info_str}
@@ -257,6 +259,7 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     # 5. Final Master Prompt
     prompt = f"""
 Task: Create a query for a vector search to find information relevant to the Question.
+Do NOT write SQL. Do NOT write code. Do NOT use markdown formatting.
 Question: "{active_query}"
 
 {known_info_str}
@@ -316,9 +319,10 @@ def generate_rewrite(state: GreenState) -> str:
         
         context_str = "\n".join(resolved_context) if resolved_context else "None"
 
+        # Had SQL problems here to so I modified the prompt.
         prompt = f"""
-    Task: Rewrite the Target Query to be highly specific by injecting information from the Resolved Queries.
-    
+    Task: Update the Original Question to be more specific by injecting information from the Known Facts.
+    Do NOT write SQL. Do NOT write code. Write a normal English sentence.    
     Resolved Queries:
     {context_str}
 

@@ -34,10 +34,11 @@ def main():
     
     # Initialize Streamer
     active_datasets = ["hotpot"]
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=5)    
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=150)    
     print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
           f"from: {', '.join(active_datasets)}")
 
+    input("Press Enter to start generation...")
     # Results Container
     # trajectories = [] # Removed in favor of continuous file writing
     
