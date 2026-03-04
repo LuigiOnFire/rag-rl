@@ -30,7 +30,9 @@ import sys
 import re
 import time
 import copy
+import signal
 import logging
+import traceback
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -83,10 +85,10 @@ JOULE_PENALTY_SCALE       = 0.05  # Multiply total_joules by this to get the pen
 MAX_JOULE_PENALTY         = 0.0   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
 
 # Dataset config
-MAX_QUESTIONS = 150   # Cap on how many examples to draw from the dataset (None = unlimited)
+MAX_QUESTIONS = None   # Cap on how many examples to draw from the dataset (None = unlimited)
 
 # Checkpoint / logging
-SAVE_EVERY    = 100
+SAVE_EVERY    = 25   # Save every N steps — keep low to minimise work lost on crash
 run_id        = time.strftime("%Y%m%d_%H%M%S")
 LOG_FILE      = f"data/ppo_training/grpo_run_{run_id}.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -110,6 +112,29 @@ logger = logging.getLogger(__name__)
 
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
+
+# ── Crash capture ────────────────────────────────────────────────────────────
+# Route any unhandled Python exception into the log file (not just stderr).
+def _log_unhandled_exception(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    logger.critical(
+        "Unhandled exception — training crashed:",
+        exc_info=(exc_type, exc_value, exc_tb),
+    )
+sys.excepthook = _log_unhandled_exception
+
+# Log GPU memory + a clean message if we receive SIGTERM (e.g. from the scheduler).
+def _sigterm_handler(signum, frame):
+    msg = "Received SIGTERM — process is being terminated."
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        msg += f" GPU mem: allocated={alloc:.2f} GB  reserved={reserved:.2f} GB"
+    logger.critical(msg)
+    sys.exit(1)
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # REWARD CALCULATION
@@ -563,6 +588,34 @@ def grpo_loss(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CHECKPOINT HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def find_latest_checkpoint(output_dir: str) -> Tuple[Optional[str], int]:
+    """
+    Scans *output_dir* for sub-directories named ``step_N`` and returns
+    ``(checkpoint_path, step_number)`` for the highest N found.
+    Returns ``(None, 0)`` when no checkpoints exist yet.
+    """
+    if not os.path.isdir(output_dir):
+        return None, 0
+
+    best_step = 0
+    best_path: Optional[str] = None
+    for entry in os.scandir(output_dir):
+        if entry.is_dir() and entry.name.startswith("step_"):
+            try:
+                n = int(entry.name.split("_", 1)[1])
+            except ValueError:
+                continue
+            if n > best_step:
+                best_step = n
+                best_path = entry.path
+
+    return best_path, best_step
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MAIN TRAINING LOOP
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -591,7 +644,19 @@ def main():
         if wandb.run is not None:
             logger.info(f"W&B run: {wandb.run.url}")
 
-    # ── 1. Load Model ────────────────────────────────────────────────────────
+    # ── 1. Detect checkpoint ─────────────────────────────────────────────────
+    ckpt_path, start_step = find_latest_checkpoint(OUTPUT_DIR)
+    if ckpt_path:
+        logger.info(f"Resuming from checkpoint: {ckpt_path}  (step {start_step})")
+        # PEFT saves each named adapter in its own subdirectory when multiple
+        # adapters are present, so adapter_config.json lives at
+        # <ckpt>/active_rl/adapter_config.json — not at <ckpt>/ directly.
+        active_rl_source = os.path.join(ckpt_path, "active_rl")
+    else:
+        logger.info("No checkpoint found — starting from SFT weights.")
+        active_rl_source = SFT_MODEL_PATH
+
+    # ── 2. Load Model ────────────────────────────────────────────────────────
     BASE_MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
     logger.info(f"Loading model from {BASE_MODEL_ID} ...")
     bnb_config = BitsAndBytesConfig(
@@ -606,8 +671,8 @@ def main():
     )
     base_model = prepare_model_for_kbit_training(base_model)
 
-    logger.info(f"Loading SFT adapter from {SFT_MODEL_PATH} ...")
-
+    # Reference adapter always stays frozen at the original SFT weights
+    logger.info(f"Loading reference adapter from {SFT_MODEL_PATH} ...")
     model = PeftModel.from_pretrained(
         base_model, 
         SFT_MODEL_PATH, 
@@ -615,9 +680,10 @@ def main():
         is_trainable=False
     )
 
-# Load second copy as the active RL policy
+    # Active RL adapter: resume from checkpoint if available, else SFT
+    logger.info(f"Loading active_rl adapter from {active_rl_source} ...")
     model.load_adapter(
-        SFT_MODEL_PATH, 
+        active_rl_source,
         adapter_name="active_rl", 
         is_trainable=True
     )
@@ -627,13 +693,15 @@ def main():
     model.print_trainable_parameters()
     model.train()
     
-    # ── 2. Reference model — NOT needed with LoRA ──────────────────────────
+    # ── 3. Reference model — NOT needed with LoRA ──────────────────────────
     # The frozen base weights live inside `model` already.  grpo_loss() calls
     # model.disable_adapter_layers() / enable_adapter_layers() to obtain
     # reference log-probs without allocating a second copy on GPU.
 
-    # ── 3. Tokenizer ─────────────────────────────────────────────────────────
-    tokenizer = AutoTokenizer.from_pretrained(SFT_MODEL_PATH)
+    # ── 4. Tokenizer ─────────────────────────────────────────────────────────
+    # Prefer tokenizer from checkpoint (may have updated special tokens)
+    tokenizer_source = ckpt_path if ckpt_path else SFT_MODEL_PATH
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
     tokenizer.pad_token = tokenizer.eos_token
 
     # ── 4. Generation Config (used inside the rollout loop) ──────────────────
@@ -657,6 +725,7 @@ def main():
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=LEARNING_RATE,
     )
+    logger.info(f"Training will run steps {start_step + 1} → {TOTAL_STEPS}")
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
     active_datasets = ["hotpot"]
@@ -673,7 +742,7 @@ def main():
     accum_loss  = 0.0
     accum_steps = 0
 
-    for step in range(TOTAL_STEPS):
+    for step in range(start_step, TOTAL_STEPS):
         # ── Collect one batch of questions ──────────────────────────────────
         batch_samples = []
         for _ in range(BATCH_SIZE):
@@ -733,7 +802,13 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad()
-            logger.info(f"  [Optim] Updated")
+            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                alloc    = torch.cuda.memory_allocated() / 1024**3
+                reserved = torch.cuda.memory_reserved() / 1024**3
+                logger.info(f"  [Optim] Updated | GPU mem: alloc={alloc:.2f} GB  reserved={reserved:.2f} GB")
+            else:
+                logger.info(f"  [Optim] Updated")
             if USE_WANDB:
                 wandb.log({"train/loss": accum_loss / GRADIENT_ACCUM}, step=step + 1)
             accum_loss = 0.0
@@ -743,13 +818,15 @@ def main():
         if (step + 1) % SAVE_EVERY == 0:
             ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{step+1}")
             os.makedirs(ckpt_dir, exist_ok=True)
-            model.save_pretrained(ckpt_dir)
+            # Save only the trainable adapter so the checkpoint root holds
+            # adapter_config.json directly (no adapter-name subdirectory).
+            model.save_pretrained(ckpt_dir, selected_adapters=["active_rl"])
             tokenizer.save_pretrained(ckpt_dir)
             logger.info(f"  [Checkpoint] Saved to {ckpt_dir}")
 
     # ── Final Save ───────────────────────────────────────────────────────────
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    model.save_pretrained(OUTPUT_DIR)
+    model.save_pretrained(OUTPUT_DIR, selected_adapters=["active_rl"])
     tokenizer.save_pretrained(OUTPUT_DIR)
     logger.info(f"\nTraining complete. Model saved to {OUTPUT_DIR}")
 
@@ -758,4 +835,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logger.critical("main() raised an exception:", exc_info=True)
+        raise

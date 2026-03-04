@@ -37,13 +37,17 @@ class HotpotQAStreamer(BaseStreamer):
             logger.error(f"Failed to load HotpotQA: {e}")
             raise e
 
-    def stream(self) -> Generator[Dict[str, Any], None, None]:
+    def stream(self, shuffle: bool = False) -> Generator[Dict[str, Any], None, None]:
         """
         Yields cleaned samples one by one.
+        
+        Args:
+            shuffle: If True, iterate in a random order (new seed each call).
         """
         if self.dataset is None:
              raise ValueError("Dataset not initialized.")
-        for row in self.dataset:
+        dataset = self.dataset.shuffle() if shuffle else self.dataset
+        for row in dataset:
             yield self._process_row(row)
 
     def _process_row(self, row: Any) -> Dict:
