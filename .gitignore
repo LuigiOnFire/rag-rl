@@ -24,3 +24,7 @@ models/
 old_models/
 wandb/
 logs/
+
+# Slurm stuff
+*.out
+*.sif
