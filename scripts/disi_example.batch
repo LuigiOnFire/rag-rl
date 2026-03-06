@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name-proteomes
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=william.crawfordiii@unibo.it
+#SBATCH --nodes=1
+#SBATCH --partition=mi210
+#SBATCH --output=risultati.log
+#SBATCH --cpus-per-task=64
+#SBATCH --gres=gpu:1
+#SBATCH --chdir=/scratch.hpc/william.crawfordiii
+#SBATCH -o slurm.%N.%j.out # STDOUT
+#SBATCH -e slurm.%N.%j.err
+
+export APPTAINER_CACHIDIR=/scratch.hpc/william.crawfordiii
+
+amd smi list 
+
+#apptainer pull docker://rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch.2.4
+
+#apptainer run --rocm pytorch_rocm6.1_ubuntu22.04_py3.10_pytorch_2.4.sif rocm-smi
