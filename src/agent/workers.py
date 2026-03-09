@@ -10,9 +10,9 @@ import os
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
 
-# Models
-MODEL_SLM = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest"
-MODEL_LLM = "llama3:8b"
+# Grab the variable, or provide a safe default just in case
+LLM_NAME = os.getenv("LLM_MODEL", "llama3:8b")
+SLM_NAME = os.getenv("SLM_MODEL", "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest")
 
 class LLMWorker:
     def __init__(self, model_name: str):
@@ -49,8 +49,8 @@ class LLMWorker:
             trace_logger.error(f"MODEL: {self.model_name}\nERROR: {error_msg}")
             return error_msg
 
-slm_worker = LLMWorker(MODEL_SLM)
-llm_worker = LLMWorker(MODEL_LLM)
+slm_worker = LLMWorker(SLM_NAME)
+llm_worker = LLMWorker(LLM_NAME)
 
 # --- LOGGING UTILITY ---
 def configure_worker_logging(log_path: str):
