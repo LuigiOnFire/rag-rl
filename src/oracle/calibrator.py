@@ -1,5 +1,6 @@
 import statistics
 import json
+import os
 from codecarbon import EmissionsTracker
 from src.agent import actions, workers
 from src.env.state import GreenState, create_initial_state
@@ -74,6 +75,10 @@ class EnergyCalibrator:
         self.save()
 
     def save(self):
+        directory = os.path.dirname(self.output_path)
+
+        if directory:
+            os.makedirs(directory, exist_okay="True")
         with open(self.output_path, "w") as f:
             json.dump(self.cost_table, f, indent=2)
         print(f"Calibration complete. Cost table saved to {self.output_path}")

@@ -17,10 +17,14 @@ export OLLAMA_MODELS="./ollama_models"
 OLLAMA_PID=$!
 sleep 15 
 
+export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 # 2. Run Python Script via Apptainer
 # <-- CRITICAL 2: Use --rocm instead of --nv
 # <-- CRITICAL 3: Use the new AMD .sif file
-apptainer run --rocm pytorch_rocm6.1_ubuntu22.04_py3.10_pytorch_2.4.sif .venv/bin/python scripts/01_calibrate.py
+apptainer run --rocm  \
+	--bind /scratch.hpc/$USER:/scratch.hpc/$USER \
+	pytorch_rocm6.1_ubuntu22.04_py3.10_pytorch_2.4.sif \
+	.venv/bin/python -u scripts/01_calibrate.py
 
 # 3. Cleanup
 kill $OLLAMA_PID
