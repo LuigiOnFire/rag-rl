@@ -78,7 +78,7 @@ class EnergyCalibrator:
         directory = os.path.dirname(self.output_path)
 
         if directory:
-            os.makedirs(directory, exist_okay="True")
+            os.makedirs(directory, exist_okay=True)
         with open(self.output_path, "w") as f:
             json.dump(self.cost_table, f, indent=2)
         print(f"Calibration complete. Cost table saved to {self.output_path}")

@@ -24,7 +24,12 @@ models/
 old_models/
 wandb/
 logs/
+ollama
+/ollama_models/
 
 # Slurm stuff
 *.out
 *.sif
+
+# Swapfiles
+*.swp
