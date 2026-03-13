@@ -1,15 +1,13 @@
 #!/bin/bash
-
-echo "🚀 Initializing RAG-RL Workspace on AMD HPC..."
+echo "🚀 Initializing RAG-RL Workspace for NVIDIA..."
 
 # 1. Create necessary directories
 echo "📁 Setting up directories..."
-mkdir -p logs
-mkdir -p ollama_models
+mkdir -p logs ollama_models data
 
 # 2. Download Ollama if it doesn't exist
-if [ ! -f "ollama" ]; then
-    echo "🦙 Downloading Ollama binary for AMD Linux..."
+if [ ! -f "bin/ollama" ]; then
+    echo "🦙 Downloading Ollama binary for Linux..."
     curl -L https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
     tar -xf ollama.tar.zst
     rm ollama.tar.zst
@@ -27,16 +25,11 @@ if [ ! -f ~/.env ]; then
     chmod 600 ~/.env
     echo "⚠️  ACTION REQUIRED: Please run 'nano ~/.env' to add your HF_TOKEN!"
 else
-    echo "✅ Secure ~/.env file already exists in home directory."
+    echo "✅ Secure ~/.env file already exists."
 fi
 
-# 4. Submit the container build job
-if [ ! -f "pytorch_rocm6.1_ubuntu22.04_py3.10_pytorch_2.4.sif" ]; then
-    echo "🐳 Submitting Apptainer setup job to Slurm..."
-    sbatch setup_amd.sbatch
-    echo "⏳ Please wait for the setup job to finish before running the pipeline."
-else
-    echo "✅ Apptainer container already exists."
-fi
+# 4. Submit the heavy lifting to Slurm!
+echo "🐳 Submitting Apptainer and Python setup job to Slurm..."
+sbatch hpc/setup_env.sbatch
 
-echo "🎉 Workspace initialization triggered! Use 'squeue -u \$USER' to monitor."
+echo "🎉 Workspace initialization triggered! Use 'squeue -u $USER' to monitor the setup."

@@ -75,6 +75,8 @@ class EnergyCalibrator:
         self.save()
 
     def save(self):
+        project_root = os.getcwd()
+        print(f"We've registered the project root as {project_root}")
         directory = os.path.dirname(self.output_path)
 
         if directory:
