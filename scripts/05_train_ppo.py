@@ -230,7 +230,7 @@ def main():
     
     # 2. Initialize Gymnasium Environment
     # The environment handles the dataset streaming internally
-    streamer = HotpotQAStreamer(split="train", limit=None)
+    streamer = HotpotQAStreamer(setting="", split="train", limit=None)
     env = GreenRAGEnv(streamer)
     
     GAMMA = 0.99  # Discount factor for future rewards

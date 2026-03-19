@@ -29,7 +29,10 @@ class LLMWorker:
             response = ollama.chat(
                 model=self.model_name, 
                 messages=messages,
-                options={"temperature": 0.0} 
+                options={
+                    "temperature": 0.0, 
+                    "num_predict": 500 
+                } # <-- Forces it to stop after 500 tokens
             )
             response_text = response['message']['content']
             # Log the interaction

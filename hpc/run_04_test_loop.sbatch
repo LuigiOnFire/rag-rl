@@ -1,43 +1,43 @@
 #!/bin/bash
-#SBATCH --job-name=01_calibrate
+#SBATCH --job-name=04_test_loop
 #SBATCH --nodes=1
-#SBATCH --partition=l40s        
+#SBATCH --partition=l40s           # <-- Targeting the idle NVIDIA nodes
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1              
-#SBATCH --output=logs/01_calibrate_%j.out 
+#SBATCH --time=04:00:00            # 4 hours is usually plenty for evaluation!
+#SBATCH --output=logs/04_test_loop_%j.out 
 
-# 1. Load the secure .env file from your HOME directory vault
+# 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
-echo "Starting Calibration on $HOSTNAME"
+echo "Starting Evaluation Loop on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
-# 2. Run Python Script via Apptainer (Notice the --nv flag and new .sif image!)
+# 2. The Container Wrap (WITH Ollama background server!)
 apptainer exec --nv  \
         --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
         --env-file ~/.env \
         pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
         bash -c '
             echo "Starting Ollama inside container..."
-            
             export OLLAMA_MODELS="./ollama_models"
-            ./bin/ollama serve > logs/ollama_calib.log 2>&1 &
+            ./bin/ollama serve > logs/ollama_test.log 2>&1 &
             OLLAMA_PID=$!
             
             # Wait for the server to wake up
             sleep 15
             
-            echo "Pulling models..."
+            # Ensure models are ready
             ./bin/ollama pull $LLM_MODEL
             ./bin/ollama pull $SLM_MODEL
             
-            echo "Running Python Calibration..."
-            .venv/bin/python -u scripts/01_calibrate.py
+            echo "Running Python Test Loop..."
+            .venv/bin/python -u scripts/04_test_loop.py
             
             echo "Cleaning up..."
             kill $OLLAMA_PID
         '
 
-echo "Calibration complete."
+echo "Evaluation complete."

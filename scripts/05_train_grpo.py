@@ -53,7 +53,7 @@ sys.path.append(os.getcwd())
 
 from src.data.loader import MixedStreamer
 from src.env.state import GreenState, create_initial_state
-from src.env.retriever import EphemeralRetriever
+from src.env.retriever import GlobalRetriever
 from src.env.engine import GreenEngine
 from src.agent import actions
 from src.agent.prompts import format_state_for_prompt
@@ -365,8 +365,8 @@ def rollout_batch(
     }
 
     for gen_idx in range(NUM_GENERATIONS):
-        # Each trajectory gets a fresh state and a fresh engine/retriever
-        retriever = EphemeralRetriever(documents=corpus)
+        # Each trajectory gets a fresh state and a fresh engine
+        retriever = GlobalRetriever.get_instance()
         engine    = GreenEngine(retriever=retriever)
         state     = create_initial_state(question, ground_truth)
 
@@ -729,9 +729,20 @@ def main():
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
     active_datasets = ["hotpot"]
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=MAX_QUESTIONS)
-    print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
-          f"from: {', '.join(active_datasets)}")
+
+    dataset_configs = {
+        "hotpot": {
+            "setting": "fullwiki", 
+            "split": "train"
+        }
+    }
+
+    streamer = MixedStreamer(
+        dataset_names=active_datasets, 
+        limit=MAX_QUESTIONS,
+        configs=dataset_configs
+    )
+    print(f"Streaming {streamer.n_limit} samples from: {', '.join(active_datasets)}")
     data_iter = streamer.stream()
 
     device = next(model.parameters()).device

@@ -6,3 +6,9 @@ torch
 ollama
 scikit-learn
 tqdm
+datasets
+peft
+trl
+bitsandbytes
+accelerate
+wandb

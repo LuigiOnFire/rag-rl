@@ -26,53 +26,67 @@ class EnergyCalibrator:
 
     def run(self):
         print("Initializing resources for calibration...")
-        # Note: We need to init the workers/models if not already
-        # They are global in src.agent.workers, so importing them helps.
-        
         print(f"Starting calibration with {self.iterations} iterations per action...")
-        
-        # We need to map Action IDs to the actual function calls we want to measure.
-        # Since we refactored, we need to bind them manually here.
-        
-        for action_id in actions.ALL_ACTION_IDS:
-            name = actions.get_action_name(action_id)
-            if action_id == actions.ACTION_FAIL:
-                self.cost_table[str(action_id)] = 0.0
-                continue
 
-            print(f"Calibrating {name}...")
+        # 1. Initialize the global tracker EXACTLY ONCE to prevent [Errno 24] file leaks
+        tracker = EmissionsTracker(output_dir="/tmp", log_level="error", measure_power_secs=0.1)
+        tracker.start()
 
-            # Initialize the retrievre and GreenEngine
-            retriever = EphemeralRetriever(documents=self.dummy_docs)
-            self.engine = GreenEngine(retriever=retriever)
-            
-            func = lambda s: self.engine.step(s, action_id, argument=None)
+        try:
+            for action_id in actions.ALL_ACTION_IDS:
+                name = actions.get_action_name(action_id)
+                if action_id == actions.ACTION_FAIL:
+                    self.cost_table[str(action_id)] = 0.0
+                    continue
 
-            if not func:
-                print(f"Skipping {name} (No function mapped)")
-                continue
+                print(f"Calibrating {name}...")
 
-            energies = []
-            
-            for i in range(self.iterations):
-                tracker = EmissionsTracker(output_dir="/tmp", log_level="error", measure_power_secs=0.1)
-                tracker.start()
-                try:
-                    state = create_initial_state(self.dummy_query)
-                    func(state)
-                except Exception as e:
-                    print(f"Error running {name}: {e}")
-                finally:
-                    tracker.stop()
-                    energy_kwh = tracker.final_emissions_data.energy_consumed
-                    energy_joules = energy_kwh * 3_600_000
-                    energies.append(energy_joules)
+                # Initialize the retriever and GreenEngine
+                retriever = EphemeralRetriever(documents=self.dummy_docs)
+                self.engine = GreenEngine(retriever=retriever)
+
+                func = lambda s: self.engine.step(s, action_id, argument=None)
+
+                if not func:
+                    print(f"Skipping {name} (No function mapped)")
+                    continue
+
+                energies = []
+
+                for i in range(self.iterations):
+                    task_name = f"task_{action_id}_{i}"
                     
-            avg_joules = statistics.mean(energies) if energies else 0.0
-            print(f"  -> {avg_joules:.4f} Joules (avg)")
-            self.cost_table[str(action_id)] = avg_joules
+                    # 2. Start a lightweight sub-task for just this iteration
+                    tracker.start_task(task_name)
+                    
+                    try:
+                        state = create_initial_state(self.dummy_query)
+                        func(state)
+                    except Exception as e:
+                        print(f"Error running {name}: {e}")
+                    finally:
+                        # 3. Stop the sub-task and extract the isolated energy delta
+                        task = tracker.stop_task(task_name)
+                        
+                        # Fallback logic to support different versions of CodeCarbon
+                        if task and hasattr(task, 'emissions_data'):
+                            energy_kwh = task.emissions_data.energy_consumed
+                        elif task and hasattr(task, 'energy_consumed'):
+                            energy_kwh = task.energy_consumed
+                        else:
+                            energy_kwh = 0.0
+                            
+                        energy_joules = energy_kwh * 3_600_000
+                        energies.append(energy_joules)   
+                        
+                avg_joules = statistics.mean(energies) if energies else 0.0
+                print(f"  -> {avg_joules:.4f} Joules (avg)")
+                self.cost_table[str(action_id)] = avg_joules
 
-        self.save()
+        finally:
+            # 4. Shutdown the global tracker perfectly at the end of all loops
+            tracker.stop()
+            self.save()
 
     def save(self):
         project_root = os.getcwd()
@@ -80,7 +94,7 @@ class EnergyCalibrator:
         directory = os.path.dirname(self.output_path)
 
         if directory:
-            os.makedirs(directory, exist_okay=True)
+            os.makedirs(directory, exist_ok=True)  # <-- Fixed the typo here too!
         with open(self.output_path, "w") as f:
             json.dump(self.cost_table, f, indent=2)
         print(f"Calibration complete. Cost table saved to {self.output_path}")

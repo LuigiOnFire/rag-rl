@@ -43,3 +43,39 @@ class EphemeralRetriever:
         top_indices = np.argsort(scores)[-k:][::-1]
         
         return [self.documents[i] for i in top_indices]
+
+import pickle
+import os
+
+class GlobalRetriever:
+    """
+    Simulates a massive vector DB by loading a pre-built index consisting of a 
+    large corpus of documents (e.g. all distractor paragraphs from the training set).
+    """
+    _instance = None
+    
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self, index_path: str = "data/meta/retriever_index.pkl"):
+        """
+        Loads the pre-built BM25 index and documents from a local pickle file.
+        """
+        if not os.path.exists(index_path):
+            raise FileNotFoundError(f"Index not found at {index_path}. Build it first with scripts/00_build_index.py")
+        
+        with open(index_path, "rb") as f:
+            data = pickle.load(f)
+            
+        self.bm25 = data["bm25"]
+        self.documents = data["documents"]
+
+    def search_bm25(self, query: str, k: int = 3) -> List[str]:
+        tokenized_query = query.split()
+        return self.bm25.get_top_n(tokenized_query, self.documents, n=k)
+
+    def search_dense(self, query: str, k: int = 3) -> List[str]:
+        raise NotImplementedError("Dense search not supported by GlobalRetriever yet.")

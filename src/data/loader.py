@@ -2,6 +2,7 @@ import random
 from typing import List
 from .hotpot import HotpotQAStreamer
 from .musique import MusiqueStreamer
+from typing import List, Dict, Any, Optional
 # import others...
 
 # A simple registry mapping string names to class objects
@@ -11,16 +12,34 @@ DATASET_REGISTRY = {
 }
 
 class MixedStreamer:
-    def __init__(self, dataset_names: List[str], split: str = "train", limit=None, shuffle: bool = True):
+    def __init__(self, 
+        dataset_names: List[str], 
+        limit=None, 
+        shuffle: bool = True,
+        configs: Optional[Dict[str, Dict[str, Any]]] = None
+    ):
         # Initialize all requested streamers
+        self.configs = configs or {}
         self.streamers = []
         self.shuffle = shuffle
         for name in dataset_names:
-            if name not in DATASET_REGISTRY:
-                raise ValueError(f"Unknown dataset: {name}")
+            # Safely grab the config for this specific dataset (defaults to {} if not found)
+            ds_config = self.configs.get(name, {})
+            
+            if name == "hotpot":
+                # **ds_config unpacks the dictionary directly into the class arguments!
+                self.streamers.append(HotpotQAStreamer(limit=limit, **ds_config))
+                
+            elif name == "musique":
+                # When you eventually build MuSiQue, it instantly supports configs too
+                # self.streamers.append(MusiqueStreamer(limit=limit, **ds_config))
+                pass
+                
+            else:
+                logger.warning(f"Dataset '{name}' is not recognized.")
             
             streamer_class = DATASET_REGISTRY[name]
-            streamer_instance = streamer_class(split=split, limit=limit)
+            streamer_instance = streamer_class(limit=limit, **ds_config)
             self.streamers.append(streamer_instance)
 
     @property

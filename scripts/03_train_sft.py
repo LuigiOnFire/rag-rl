@@ -156,13 +156,14 @@ def main():
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
         logging_steps=10,
-        num_train_epochs=10,        # 10 Epochs is safe with masking
+        num_train_epochs=4,        # 10 Epochs is safe with masking
         max_grad_norm=0.3,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         optim="paged_adamw_32bit",
         save_strategy="epoch",
         save_total_limit=5,
+        report_to="wandb",          # <-- Here is the magic W&B trigger!
         # packing=False, # Optional: explicit False is safer for some versions
     )
     

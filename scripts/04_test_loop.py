@@ -61,7 +61,7 @@ def get_director_action(model, tokenizer, state: GreenState):
             **inputs, 
             max_new_tokens=64,
             pad_token_id=tokenizer.eos_token_id,
-            do_sample=False 
+            do_sample=True 
         )
     
     full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
