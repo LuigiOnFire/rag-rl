@@ -4,7 +4,7 @@
 #SBATCH --partition=l40s           # <-- Targeting the idle NVIDIA nodes
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
 #SBATCH --time=12:00:00            # Kept your 12-hour limit!
 #SBATCH --output=logs/02_trajectory_%j.out 

@@ -12,3 +12,4 @@ trl
 bitsandbytes
 accelerate
 wandb
+faiss-cpu

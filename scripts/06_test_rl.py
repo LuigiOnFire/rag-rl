@@ -14,7 +14,7 @@ from src.env.state import create_initial_state, GreenState, Document
 from src.agent.prompts import format_state_for_prompt
 from src.agent import actions
 from src.data.hotpot import HotpotQAStreamer
-from src.env.retriever import EphemeralRetriever
+from src.env.retriever import GlobalRetriever
 from src.env.engine_old import execute_action
 
 # --- CONFIG ---
@@ -83,7 +83,7 @@ def run_hotpot_episode(model, tokenizer, sample: dict):
     print(f"\n{'='*60}\nHOTPOT Q: {question}\n{'='*60}")
     
     state = create_initial_state(question)
-    local_retriever = EphemeralRetriever(corpus)
+    local_retriever = GlobalRetriever.get_instance()
     
     for step in range(MAX_STEPS):
         print(f"\n--- Step {step+1} ---")

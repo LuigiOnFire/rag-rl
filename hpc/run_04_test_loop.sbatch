@@ -4,7 +4,7 @@
 #SBATCH --partition=l40s           # <-- Targeting the idle NVIDIA nodes
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
 #SBATCH --time=04:00:00            # 4 hours is usually plenty for evaluation!
 #SBATCH --output=logs/04_test_loop_%j.out 

@@ -4,7 +4,7 @@ from typing import Any, Tuple, TypedDict, cast, Dict
 
 # Project Imports
 from src.env.state import create_initial_state, GreenState
-from src.env.retriever import EphemeralRetriever
+from src.env.retriever import GlobalRetriever
 from src.env.engine import GreenEngine
 from src.rl.rewards import calculate_reward
 from src.agent.prompts import format_state_for_prompt
@@ -53,7 +53,7 @@ class GreenRAGEnv(gym.Env):
 
         self.state = create_initial_state(self.current_sample['question'], self.current_sample['answer'])
         self.ground_truth = self.current_sample['answer']
-        self.retriever = EphemeralRetriever(self.current_sample['corpus'])
+        self.retriever = GlobalRetriever.get_instance()
         self.engine = GreenEngine(retriever=self.retriever)
 
         

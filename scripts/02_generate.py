@@ -10,7 +10,7 @@ sys.path.append(os.getcwd())
 
 from src.agent import workers
 from src.env.state import GreenState, create_initial_state
-from src.env.retriever import EphemeralRetriever
+from src.env.retriever import GlobalRetriever
 from src.oracle.search import OracleSearch, WaterfallOracle
 from src.data.loader import MixedStreamer
 
@@ -34,7 +34,13 @@ def main():
     
     # Initialize Streamer
     active_datasets = ["hotpot"]
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=150)    
+    dataset_configs = {
+        "hotpot": {
+            "setting": "fullwiki", 
+            "split": "train"
+        }
+    }
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=150, configs=dataset_configs)    
     print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
           f"from: {', '.join(active_datasets)}")
 
@@ -56,9 +62,9 @@ def main():
         
         print(f"\n[{count+1}/{total}] Processing: {question}")
         
-        # Instantiate Ephemeral Retriever with specific corpus
+        # Instantiate Global Retriever with pre-built index
         corpus = sample["corpus"]
-        retriever = EphemeralRetriever(documents=corpus)
+        retriever = GlobalRetriever.get_instance()
         
         # Instantiate Oracle Search
         # Important! This is where we actually initiate the search to sovle the problem
