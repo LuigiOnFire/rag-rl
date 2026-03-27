@@ -31,7 +31,7 @@ class HotpotQAStreamer(BaseStreamer):
         try:
             logger.info(f"Loading HotpotQA ({setting}) split='{split}'...")
             # We dynamically pass the setting here
-            self.dataset = load_dataset("hotpot_qa", self.setting, split=self.split) 
+            self.dataset = load_dataset("hotpot_qa", self.setting, split=self.split, trust_remote_code=True) 
             self.total_size: int = len(self.dataset)  # full dataset size before any limit
             
             if self.limit:

@@ -10,7 +10,7 @@ sys.path.append(os.getcwd())
 
 from src.agent import workers
 from src.env.state import GreenState, create_initial_state
-from src.env.retriever import GlobalRetriever
+from src.env.retriever import EphemeralRetriever
 from src.oracle.search import OracleSearch, WaterfallOracle
 from src.data.loader import MixedStreamer
 
@@ -19,7 +19,7 @@ FORCE_DECOMP_RATE = 1
 
 def main():
     # Initialize Logging
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s/n%(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s\n%(message)s')
     logging.getLogger().setLevel(logging.DEBUG)
     print("Starting Oracle Generation...")
 
@@ -33,50 +33,54 @@ def main():
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
     
     # Initialize Streamer
-    active_datasets = ["hotpot"]
+    active_datasets = ["hotpot", "musique", "twowiki"]
     dataset_configs = {
         "hotpot": {
-            "setting": "fullwiki", 
+            "setting": "distractor", 
+            "split": "train"
+        },
+        "musique": {
+            "setting": "distractor", 
+            "split": "train"
+        },
+        "twowiki": {
+            "setting": "distractor", 
             "split": "train"
         }
     }
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=150, configs=dataset_configs)    
+    
+    # Passing limit=50 here gives an even mix; limit gives 50 samples per active dataset = 150 total.
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=50, configs=dataset_configs)
+    
     print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
           f"from: {', '.join(active_datasets)}")
 
-    # Results Container
-    # trajectories = [] # Removed in favor of continuous file writing
-    
     # Process Stream
     total = streamer.n_limit
     count = 0
     for sample in streamer.stream():
-        # Setup Retriever
-        # ... run search ...    
         question = sample['question']
-        ground_truth = sample['answer']
+        ground_truth = sample['ground_truth'] if 'ground_truth' in sample else sample['answer']
     
         log_file = f"{run_dir}/q_{count}.log"
         workers.configure_worker_logging(log_file)
 
-        
         print(f"\n[{count+1}/{total}] Processing: {question}")
         
-        # Instantiate Global Retriever with pre-built index
+        # Instantiate Ephemeral Retriever (Local context only)
         corpus = sample["corpus"]
-        retriever = GlobalRetriever.get_instance()
+        if not corpus:
+            print("  -> Warning: No corpus found for Ephemeral Retriever. Ensure you are not in fullwiki mode.")
+            continue
+            
+        retriever = EphemeralRetriever(documents=corpus)
         
-        # Instantiate Oracle Search
-        # Important! This is where we actually initiate the search to sovle the problem
+        # Instantiate Oracle Search using the local retriever
         oracle_search = WaterfallOracle(retriever=retriever)
         logging.info("Initialized Oracle Search.")        
+        
         # Setup Oracle Search
         start_state = create_initial_state(question)
-
-        # Generate some of the trajectories with forcing decomposition first
-
-        # if random.random() < FORCE_DECOMP_RATE:            
-        #     oracle_search.force_decompose = True
 
         # Run Search
         logging.info("Starting Oracle Search...")

@@ -367,16 +367,22 @@ def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     
     if not found_docs:
         context_str = "No external documents found. Rely on internal knowledge."
-
     
-    prompt = f"""
-Task: Break down the Main Question into 2-4 simple, independent sub-questions or search queries.
-Constraint: Return ONLY the numbered list. No intro, no filler.
+    prompt = f"""You are an expert AI search planner.
+Task: Break down the Main Question into 2-4 simple, independent search queries based on the provided Context.
+Constraint: Return ONLY a valid numbered list. No intro, no filler.
+
+Context:
+{context_str}
 
 Main Question: "{question}"
     
+Example Output:
+1. First search query goes here
+2. Second search query goes here
+
 Plan:
-    """
+"""
     
     # 2. Generate
     raw_plan = worker.generate(prompt)

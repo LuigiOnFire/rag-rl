@@ -22,6 +22,7 @@ __pycache__/
 /data/
 models/
 old_models/
+old_data/
 wandb/
 logs/
 ollama

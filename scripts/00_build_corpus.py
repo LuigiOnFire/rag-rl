@@ -5,6 +5,7 @@ import requests
 import pickle
 from tqdm import tqdm
 
+# NOTE: Hotpot uses 2017 wikipedia, Musique wants to use 2020 wikipedia, NQopen also uses 2020 maybe?
 DUMP_URL = "https://nlp.stanford.edu/projects/hotpotqa/enwiki-20171001-pages-meta-current-withlinks-abstracts.tar.bz2"
 DUMP_PATH = "data/meta/enwiki-20171001-pages-meta-current-withlinks-processed.tar.bz2"
 OUT_CORPUS = "data/meta/fullwiki_corpus.pkl"

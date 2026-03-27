@@ -29,7 +29,9 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
-BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+BASE_MODEL = os.getenv("SLM_MODEL", "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest")
+if BASE_MODEL == "qwen2.5:3b":
+    BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 RUN_LOGS_DIR = "data/trajectories"
 OUTPUT_DIR = "models/green-rag-sft-v1"
 # --- 1. CLEANING & LOADING LOGIC ---

@@ -18,7 +18,9 @@ from src.env.retriever import GlobalRetriever
 from src.env.engine_old import execute_action
 
 # --- CONFIG ---
-BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+BASE_MODEL = os.getenv("SLM_MODEL", "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest")
+if BASE_MODEL == "qwen2.5:3b":
+    BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 # KEY CHANGE: Point to the RL-trained model
 ADAPTER_PATH = "models/green-rag-rl-v1" 
 MAX_STEPS = 5

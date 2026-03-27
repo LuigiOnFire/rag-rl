@@ -89,6 +89,8 @@ MAX_QUESTIONS = None   # Cap on how many examples to draw from the dataset (None
 
 # Checkpoint / logging
 SAVE_EVERY    = 25   # Save every N steps — keep low to minimise work lost on crash
+EVAL_EVERY    = 25   # Evaluate on a validation set every N steps
+EVAL_SAMPLES  = 5    # How many questions to evaluate during the eval phase   # Save every N steps — keep low to minimise work lost on crash
 run_id        = time.strftime("%Y%m%d_%H%M%S")
 LOG_FILE      = f"data/ppo_training/grpo_run_{run_id}.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -338,6 +340,7 @@ def rollout_batch(
     sample: Dict[str, Any],
     generation_config: GenerationConfig,
     device: torch.device,
+    num_generations: int = NUM_GENERATIONS
 ) -> Tuple[List[str], List[float], List[Optional[GreenState]], Dict[str, Any]]:
     """
     Generate NUM_GENERATIONS independent trajectories for one question.
@@ -364,7 +367,7 @@ def rollout_batch(
         "search": 0, "keyword": 0, "dense": 0, "decompose": 0, "verify": 0, "rewrite": 0, "other": 0
     }
 
-    for gen_idx in range(NUM_GENERATIONS):
+    for gen_idx in range(num_generations):
         # Each trajectory gets a fresh state and a fresh engine
         retriever = GlobalRetriever.get_instance()
         engine    = GreenEngine(retriever=retriever)
@@ -495,6 +498,7 @@ def grpo_loss(
     trajectories: List[str],
     rewards: List[float],
     device: torch.device,
+    batch_scale: float = 1.0,
 ) -> torch.Tensor:
     """
     Compute the GRPO policy-gradient loss for one group of trajectories.
@@ -514,7 +518,7 @@ def grpo_loss(
     std_r  = reward_tensor.std() + 1e-8
     advantages = (reward_tensor - mean_r) / std_r  # shape (G,)
 
-    total_loss = torch.tensor(0.0, requires_grad=True, device=device)
+    total_loss = 0.0
     num_valid  = 0
 
     for traj, advantage in zip(trajectories, advantages):
@@ -577,14 +581,20 @@ def grpo_loss(
         kl_loss = KL_COEF * kl
 
         traj_loss = pg_loss + kl_loss
-        total_loss = total_loss + traj_loss
+        
+        # Backward pass per trajectory to save memory
+        # We divide by len(trajectories) acting as num_valid surrogate
+        scaled_traj_loss = (traj_loss / len(trajectories)) / batch_scale
+        scaled_traj_loss.backward()
+
+        total_loss += traj_loss.item()
         num_valid += 1
 
     if num_valid == 0:
         logger.warning("  [GRPO] No valid trajectories in this batch!")
-        return torch.tensor(0.0, requires_grad=True, device=device)
+        return 0.0
 
-    return total_loss / num_valid
+    return (total_loss / num_valid) / batch_scale
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -657,7 +667,9 @@ def main():
         active_rl_source = SFT_MODEL_PATH
 
     # ── 2. Load Model ────────────────────────────────────────────────────────
-    BASE_MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
+    BASE_MODEL_ID = os.getenv("SLM_MODEL", "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest")
+    if BASE_MODEL_ID == "qwen2.5:3b":
+        BASE_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
     logger.info(f"Loading model from {BASE_MODEL_ID} ...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -728,14 +740,23 @@ def main():
     logger.info(f"Training will run steps {start_step + 1} → {TOTAL_STEPS}")
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
-    active_datasets = ["hotpot"]
+    active_datasets = ["hotpot", "musique", "twowiki"]
 
     dataset_configs = {
         "hotpot": {
             "setting": "fullwiki", 
             "split": "train"
+        },
+        "musique": {
+            "setting": "fullwiki", 
+            "split": "train"
+        },
+        "twowiki": {
+            "setting": "fullwiki", 
+            "split": "train"
         }
     }
+
 
     streamer = MixedStreamer(
         dataset_names=active_datasets, 
@@ -744,6 +765,28 @@ def main():
     )
     print(f"Streaming {streamer.n_limit} samples from: {', '.join(active_datasets)}")
     data_iter = streamer.stream()
+
+    # Create Eval Streamer
+    eval_streamer = MixedStreamer(
+        dataset_names=active_datasets,
+        limit=EVAL_SAMPLES,
+        configs={
+            "hotpot": {
+                "setting": "fullwiki",
+                "split": "validation" # Use validation split for eval
+            },
+            "musique": {
+                "setting": "fullwiki",
+                "split": "validation"
+            },
+            "twowiki": {
+                "setting": "fullwiki",
+                "split": "validation"
+            }
+        }
+    )
+    eval_iter = eval_streamer.stream()
+
 
     device = next(model.parameters()).device
     logger.info(f"Training device: {device}")
@@ -793,19 +836,15 @@ def main():
                 wandb.log({**batch_metrics, "train/grpo_step": step + 1}, step=step + 1)
 
             # ── Phase 2: GRPO Loss ───────────────────────────────────────────
-            loss = grpo_loss(
-                model, tokenizer, trajectories, rewards, device
+            # We pass scale to grpo_loss, which handles the localized backward passes!
+            scaled_loss = grpo_loss(
+                model, tokenizer, trajectories, rewards, device,
+                batch_scale=len(batch_samples) * GRADIENT_ACCUM
             )
-            logger.info(f"  GRPO loss: {loss.item():.4f}")
-            
-            # Scale the loss by batch size and gradient accumulation steps
-            scaled_loss = loss / (len(batch_samples) * GRADIENT_ACCUM)
-
-            # Backpropagate the scaled loss
-            scaled_loss.backward()
+            logger.info(f"  GRPO scaled loss: {scaled_loss:.4f}")
 
             # Track the scalar loss for logging
-            accum_loss += scaled_loss.item()
+            accum_loss += scaled_loss
 
         accum_steps += 1
 
@@ -825,15 +864,49 @@ def main():
             accum_loss = 0.0
 
 
+
+
         # ── Checkpoint ───────────────────────────────────────────────────────
         if (step + 1) % SAVE_EVERY == 0:
             ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{step+1}")
             os.makedirs(ckpt_dir, exist_ok=True)
-            # Save only the trainable adapter so the checkpoint root holds
-            # adapter_config.json directly (no adapter-name subdirectory).
             model.save_pretrained(ckpt_dir, selected_adapters=["active_rl"])
             tokenizer.save_pretrained(ckpt_dir)
             logger.info(f"  [Checkpoint] Saved to {ckpt_dir}")
+
+        # ── Evaluation ───────────────────────────────────────────────────────
+        if (step + 1) % EVAL_EVERY == 0:
+            logger.info(f"{'='*20} Evaluation Phase (Step {step+1}) {'='*20}")
+            model.eval()
+            eval_accum_loss = 0.0
+            eval_accuracy = 0.0
+            
+            # Rehydrate eval iterator
+            eval_iter = eval_streamer.stream()
+            eval_samples = []
+            for _ in range(EVAL_SAMPLES):
+                try:
+                    eval_samples.append(next(eval_iter))
+                except StopIteration:
+                    break
+            
+            for eval_sample in eval_samples:
+                logger.info(f"  [Eval] Q: {eval_sample['question'][:80]}")
+                _, _, _, batch_metrics = rollout_batch(
+                    model, tokenizer, eval_sample, generation_config, device, num_generations=1
+                )
+                eval_accuracy += batch_metrics['accuracy/mean']
+                logger.info(f"  [Eval] Acc: {batch_metrics['accuracy/mean']:.2f}")
+
+            if len(eval_samples) > 0:
+                mean_eval_acc = eval_accuracy / len(eval_samples)
+                logger.info(f"  => Mean Evaluation Accuracy: {mean_eval_acc:.4f}")
+                if USE_WANDB:
+                    wandb.log({"eval/accuracy": mean_eval_acc}, step=step + 1)
+            
+            model.train() # Set back to train mode!
+            logger.info(f"{'='*60}")
+
 
     # ── Final Save ───────────────────────────────────────────────────────────
     os.makedirs(OUTPUT_DIR, exist_ok=True)
