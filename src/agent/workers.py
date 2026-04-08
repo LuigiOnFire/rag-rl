@@ -31,7 +31,8 @@ class LLMWorker:
                 messages=messages,
                 options={
                     "temperature": 0.0, 
-                    "num_predict": 500 
+                    "num_predict": 500,
+                    "num_ctx": 8192
                 } # <-- Forces it to stop after 500 tokens
             )
             response_text = response['message']['content']

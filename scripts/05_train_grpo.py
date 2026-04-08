@@ -33,6 +33,8 @@ import copy
 import signal
 import logging
 import traceback
+import random
+import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -361,6 +363,7 @@ def rollout_batch(
     final_states: List[Optional[GreenState]] = []
     correct_flags: List[bool]                = []
     joules_list:   List[float]               = []
+    steps_list:    List[int]                 = []
 
     # Action-use counters across the whole group
     action_totals: Dict[str, int] = {
@@ -387,6 +390,7 @@ def rollout_batch(
 
         # Tally action usage from this trajectory's history
         history = final_state.get("history", []) if final_state else []
+        steps_list.append(len(history))
         for item in history:
             aid = item.get("action_id", -1)
             if aid in _SEARCH_IDS:
@@ -418,6 +422,7 @@ def rollout_batch(
         "reward/max":           max(rewards),
         "accuracy/mean":        sum(correct_flags) / len(correct_flags),
         "cost/mean_joules":     sum(joules_list) / len(joules_list),
+        "metrics/mean_steps":   sum(steps_list) / len(steps_list) if steps_list else 0,
         "tool_pct/search":      action_totals["search"] / total_actions,
         "tool_pct/keyword":     action_totals["keyword"]    / total_actions,
         "tool_pct/dense":       action_totals["dense"]      / total_actions,
@@ -499,7 +504,7 @@ def grpo_loss(
     rewards: List[float],
     device: torch.device,
     batch_scale: float = 1.0,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, float]:
     """
     Compute the GRPO policy-gradient loss for one group of trajectories.
 
@@ -519,6 +524,7 @@ def grpo_loss(
     advantages = (reward_tensor - mean_r) / std_r  # shape (G,)
 
     total_loss = 0.0
+    total_kl   = 0.0
     num_valid  = 0
 
     for traj, advantage in zip(trajectories, advantages):
@@ -577,7 +583,10 @@ def grpo_loss(
         pg_loss  = torch.max(pg_loss1, pg_loss2).mean()
 
         # ── KL Penalty (keeps policy close to reference) ───────────────────
-        kl = (chosen_logp - chosen_ref_logp.detach()).mean()
+        # DeepSeek GRPO uses a strictly positive KL estimator to fix negative variance:
+        # KL ≈ (π_ref / π) - log(π_ref / π) - 1
+        # Let log_ratio = log(π / π_ref). Then log(π_ref / π) = -log_ratio
+        kl = (torch.exp(-log_ratio) + log_ratio - 1.0).mean()
         kl_loss = KL_COEF * kl
 
         traj_loss = pg_loss + kl_loss
@@ -588,13 +597,14 @@ def grpo_loss(
         scaled_traj_loss.backward()
 
         total_loss += traj_loss.item()
+        total_kl += kl.item()
         num_valid += 1
 
     if num_valid == 0:
         logger.warning("  [GRPO] No valid trajectories in this batch!")
-        return 0.0
+        return 0.0, 0.0
 
-    return (total_loss / num_valid) / batch_scale
+    return (total_loss / num_valid) / batch_scale, (total_kl / num_valid)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -629,7 +639,14 @@ def find_latest_checkpoint(output_dir: str) -> Tuple[Optional[str], int]:
 # MAIN TRAINING LOOP
 # ──────────────────────────────────────────────────────────────────────────────
 
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 def main():
+    set_seed(42)
     logger.info("=== GreenRAG GRPO Training ===")
     logger.info(f"Run ID: {run_id}")
 
@@ -794,6 +811,7 @@ def main():
     # ── 7. Outer Training Loop ───────────────────────────────────────────────
     optimizer.zero_grad()
     accum_loss  = 0.0
+    accum_kl    = 0.0
     accum_steps = 0
 
     for step in range(start_step, TOTAL_STEPS):
@@ -837,14 +855,15 @@ def main():
 
             # ── Phase 2: GRPO Loss ───────────────────────────────────────────
             # We pass scale to grpo_loss, which handles the localized backward passes!
-            scaled_loss = grpo_loss(
+            scaled_loss, mean_kl = grpo_loss(
                 model, tokenizer, trajectories, rewards, device,
                 batch_scale=len(batch_samples) * GRADIENT_ACCUM
             )
-            logger.info(f"  GRPO scaled loss: {scaled_loss:.4f}")
+            logger.info(f"  GRPO scaled loss: {scaled_loss:.4f}  KL: {mean_kl:.4f}")
 
             # Track the scalar loss for logging
             accum_loss += scaled_loss
+            accum_kl += mean_kl
 
         accum_steps += 1
 
@@ -860,10 +879,12 @@ def main():
             else:
                 logger.info(f"  [Optim] Updated")
             if USE_WANDB:
-                wandb.log({"train/loss": accum_loss / GRADIENT_ACCUM}, step=step + 1)
+                wandb.log({
+                    "train/loss": accum_loss / GRADIENT_ACCUM,
+                    "train/kl":   accum_kl / GRADIENT_ACCUM
+                }, step=step + 1)
             accum_loss = 0.0
-
-
+            accum_kl   = 0.0
 
 
         # ── Checkpoint ───────────────────────────────────────────────────────
