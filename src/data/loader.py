@@ -18,12 +18,14 @@ DATASET_REGISTRY = {
 class MixedStreamer:
     def __init__(self, 
         dataset_names: List[str], 
+        weights: Optional[List[float]] = None,
         limit=None, 
         shuffle: bool = True,
         configs: Optional[Dict[str, Dict[str, Any]]] = None
     ):
         self.configs = configs or {}
         self.streamers = []
+        self.weights = weights
         self.shuffle = shuffle
         for name in dataset_names:
             ds_config = self.configs.get(name, {})
@@ -50,9 +52,17 @@ class MixedStreamer:
         """Randomly yields samples from the active iterators."""
         active_iters = [s.stream(shuffle=self.shuffle) for s in self.streamers]
         
+        if self.weights:
+            active_weights = list(self.weights)
+        else:
+            active_weights = [1.0] * len(active_iters)
+        
         while active_iters:
-            current_iter = random.choice(active_iters)
+            # We must use random.choices which returns a list of 1 element
+            current_iter = random.choices(active_iters, weights=active_weights, k=1)[0]
             try:
                 yield next(current_iter)
             except StopIteration:
-                active_iters.remove(current_iter)
+                idx = active_iters.index(current_iter)
+                active_iters.pop(idx)
+                active_weights.pop(idx)

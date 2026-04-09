@@ -76,8 +76,8 @@ MAX_NEW_TOKENS       = 64     # Tokens generated per LLM call inside the loop
 
 # Training config
 TOTAL_STEPS          = 2000   # Training steps (each step = one batch of questions)
-LEARNING_RATE        = 1e-5
-GRADIENT_ACCUM       = 4
+LEARNING_RATE        = 5e-6
+GRADIENT_ACCUM       = 8
 KL_COEF              = 0.04   # β — KL penalty coefficient (keeps policy close to ref)
 CLIP_EPS             = 0.2    # ε — PPO-style clipping (applied inside GRPO loss)
 
@@ -758,6 +758,7 @@ def main():
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
     active_datasets = ["hotpot", "musique", "twowiki"]
+    dataset_weights = [0.8, 0.1, 0.1]
 
     dataset_configs = {
         "hotpot": {
@@ -777,6 +778,7 @@ def main():
 
     streamer = MixedStreamer(
         dataset_names=active_datasets, 
+        weights=dataset_weights,
         limit=MAX_QUESTIONS,
         configs=dataset_configs
     )
