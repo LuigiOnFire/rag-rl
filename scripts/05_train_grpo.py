@@ -69,25 +69,27 @@ SFT_MODEL_PATH       = "models/green-rag-sft-v1"
 OUTPUT_DIR           = "models/green-rag-grpo-v1"
 
 # Rollout config
-NUM_GENERATIONS      = 8      # Trajectories per question (the "group" in GRPO)
-BATCH_SIZE           = 2      # Questions per outer training step
-MAX_STEPS_PER_TRAJ   = 8      # Max engine steps before forcing termination
-MAX_NEW_TOKENS       = 64     # Tokens generated per LLM call inside the loop
+NUM_GENERATIONS      = 8     # Trajectories per question (the "group" in GRPO)
+BATCH_SIZE           = 2     # Questions per outer training step
+MAX_STEPS_PER_TRAJ   = 8     # Max engine steps before forcing termination
+MAX_NEW_TOKENS       = 4     # Tokens generated per LLM call inside the loop
 
 # Training config
-TOTAL_STEPS          = 2000   # Training steps (each step = one batch of questions)
-LEARNING_RATE        = 5e-6
-GRADIENT_ACCUM       = 8
-KL_COEF              = 0.04   # β — KL penalty coefficient (keeps policy close to ref)
+TOTAL_STEPS          = 15   # Training steps (each step = one batch of questions)
+LEARNING_RATE        = 8e-7
+GRADIENT_ACCUM       = 1
+KL_COEF              = 0.001  # β — KL penalty coefficient (keeps policy close to ref)
 CLIP_EPS             = 0.2    # ε — PPO-style clipping (applied inside GRPO loss)
 
 # Reward config
-FORMAT_CONSOLATION_REWARD = 0.1   # Reward for valid format but wrong answer
-JOULE_PENALTY_SCALE       = 0.05  # Multiply total_joules by this to get the penalty
-MAX_JOULE_PENALTY         = 0.0   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
+FORMAT_CONSOLATION_REWARD = 0.0   # Reward for valid format but wrong answer
+JOULE_PENALTY_SCALE       = 0.01  # Multiply total_joules by this to get the penalty
+MAX_JOULE_PENALTY         = 0.20   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
 
 # Dataset config
 MAX_QUESTIONS = None   # Cap on how many examples to draw from the dataset (None = unlimited)
+OVERFIT_MODE  = True   # Set to True to train repeatedly on two specific questions
+ONLY_EASY_MODE = False  # Set to True to train only on 'level == easy' questions from HotpotQA
 
 # Checkpoint / logging
 SAVE_EVERY    = 25   # Save every N steps — keep low to minimise work lost on crash
@@ -113,6 +115,11 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+
+# Silence noisy HTTP logs from Ollama / Requests
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
@@ -151,16 +158,18 @@ def compute_reward(
     ground_truth: str,
     question: str,
     format_valid: bool,
+    joule_penalty_scale: float = JOULE_PENALTY_SCALE,
+    max_joule_penalty: float = MAX_JOULE_PENALTY,
 ) -> Tuple[float, bool]:
     """
     Returns (scalar_reward, is_correct).
 
-    Correct answer:    1.0  - min(MAX_JOULE_PENALTY, total_joules * JOULE_PENALTY_SCALE)
+    Correct answer:    1.0  - min(max_joule_penalty, total_joules * joule_penalty_scale)
     Valid format only: FORMAT_CONSOLATION_REWARD  (+0.1)
     Broken format:     0.0
     """
     if final_state is None or not format_valid:
-        return 0.0, False
+        return FORMAT_CONSOLATION_REWARD, False
 
     final_answer = final_state.get("answer") or ""
 
@@ -172,7 +181,7 @@ def compute_reward(
 
     if is_correct:
         total_joules = float(final_state.get("total_joules", 0.0))
-        joule_penalty = min(MAX_JOULE_PENALTY, total_joules * JOULE_PENALTY_SCALE)
+        joule_penalty = min(max_joule_penalty, total_joules * joule_penalty_scale)
         reward = 1.0 - joule_penalty
         logger.info(f"  [Reward] CORRECT | joules={total_joules:.3f} penalty={joule_penalty:.3f} reward={reward:.3f}")
         return reward, True
@@ -210,16 +219,16 @@ def rollout_one_trajectory(
     initial_state: GreenState,
     generation_config: GenerationConfig,
     device: torch.device,
-) -> Tuple[str, Optional[GreenState], bool]:
+) -> Tuple[List[Dict[str, str]], Optional[GreenState], bool]:
     """
     Run one complete trajectory by interleaving LLM generation and GreenEngine steps.
 
     Returns
     -------
-    full_trajectory_text : str
-        The entire text string that was accumulated (prompt + all
-        generated tokens + all environment observations).  This is the
-        string handed to the GRPO loss later.
+    trajectory_steps : List[Dict[str, str]]
+        A list of state-action pairs containing {"prompt": ..., "completion": ...}
+        This guarantees each decision is judged on the exact state representation
+        active at that moment.
     final_state : GreenState | None
         State at termination, or None on catastrophic error.
     format_valid : bool
@@ -228,17 +237,14 @@ def rollout_one_trajectory(
     state = copy.deepcopy(initial_state)
 
     # The "running prompt" starts as the formatted initial observation.
-    # We build this as a plain string and re-tokenize on every LLM call.
-    current_prompt = format_state_for_prompt(state) + "\nAction:"
+    current_prompt = format_state_for_prompt(state) + "\nAction: "
 
-    # Track the full trajectory as a single growing string.
-    # We record the ENTIRE context (prompts + generated text + observations)
-    # so that the GRPO loss can compute log-probs over the agent tokens later.
-    full_trajectory = current_prompt
-
+    trajectory_steps = []
     format_valid = False  # Becomes True once we successfully parse+execute an action
 
     for step_i in range(MAX_STEPS_PER_TRAJ):
+        logger.info(f"\n--- STEP {step_i+1} ---")
+        logger.info(f"[MODEL SEES]\n{current_prompt}")
 
         # ── LLM CALL ────────────────────────────────────────────────────────
         inputs = tokenizer(
@@ -253,37 +259,74 @@ def rollout_one_trajectory(
         model.eval()
         if hasattr(model, "gradient_checkpointing_disable"):
             model.gradient_checkpointing_disable()
+        model.config.use_cache = True
 
         # 2. Generate with KV Cache explicitly enabled
         with torch.no_grad():
-            output_ids = model.generate(
+            outputs = model.generate(
                 input_ids,
                 generation_config=generation_config,
                 tokenizer=tokenizer,
                 stop_strings=generation_config.stop_strings,
                 attention_mask=attention_mask,
                 use_cache=True, # <--- Force KV Cache on
+                output_logits=True,
+                return_dict_in_generate=True,
             )
-        
-        # 3. Switch back to Train mode and turn Checkpointing back on
+            output_ids = outputs.sequences
+            scores = outputs.logits  # Tuple of (batch_size, vocab_size) for each generated step
+
+            # Exact logprobs from sampling time (no dropout/drift)
+            prompt_len = input_ids.shape[1]
+            new_token_ids = output_ids[0, prompt_len:]
+            gen_len = len(scores)
+            
+            old_logprobs_gen = []
+            for i in range(gen_len):
+                tok_logits = scores[i][0]  # (vocab_size,)
+                tok_logprobs = F.log_softmax(tok_logits, dim=-1)
+                # new_token_ids[i] is the token that was sampled at step i
+                old_logprobs_gen.append(tok_logprobs[new_token_ids[i]].detach().cpu())
+            
+            # Massive Memory Leak Fix: Drop generator outputs before training
+            del outputs, scores, tok_logits, tok_logprobs
+            torch.cuda.empty_cache()
+
+            # 3. Brutally force Checkpointing back ON and Cache OFF for training
+        model.config.use_cache = False        
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
         model.train()
 
         # Decode only the *new* tokens (after the prompt)
-        prompt_len = input_ids.shape[1]
-        new_token_ids = output_ids[0, prompt_len:]
         generated_text = tokenizer.decode(new_token_ids, skip_special_tokens=True).strip()
 
-        logger.info(f"    [Rollout step {step_i}] Generated: '{generated_text[:80]}'")
+        logger.info(f"\n[MODEL SAID]\n{generated_text}")
 
         # ── PARSE ACTION ───────────────────────────────────────────────
         action_id, argument = _parse_action(generated_text)
 
+        action_name = getattr(actions, 'get_action_name', lambda x: f"ACTION_{x}")(action_id)
+        if action_id < 0 or action_id not in actions.ALL_ACTION_IDS:
+            action_name = "INVALID_ACTION"
+
+        logger.info(f"\n[ACTION TAKEN]\n{action_name} ({argument})")
+
+        # ── APPEND TO TRAJECTORY STATES ──────────────────────────────────
+        # Save a clean snapshot of exactly what prompted the model -> what it said
+        # We also save the raw token IDs to guarantee Phase 2 aligns perfectly and 
+        # avoids ANY tokenizer string-merging bugs (space+digit mismatches).
+        trajectory_steps.append({
+            "prompt": current_prompt,
+            "completion": " " + generated_text + "\n",
+            "prompt_ids": input_ids[0].cpu().tolist(),
+            "new_token_ids": new_token_ids.cpu().tolist(),
+            "old_logprobs": old_logprobs_gen
+        })
+
         if action_id < 0 or action_id not in actions.ALL_ACTION_IDS:
             # Parsing failure — record it and end this trajectory early
-            logger.info(f"    [Rollout step {step_i}] PARSE FAIL: '{generated_text[:60]}'")
-            full_trajectory += generated_text + "\n[PARSE_ERROR]\n"
+            logger.info(f"\n[OBSERVATION]\nPARSE FAIL\n")
             break
 
         # ── ENGINE STEP ─────────────────────────────────────────────────────
@@ -291,8 +334,7 @@ def rollout_one_trajectory(
             new_state = engine.step(state, action_id, argument=argument or None)
             format_valid = True
         except Exception as exc:
-            logger.warning(f"    [Rollout step {step_i}] Engine error: {exc}")
-            full_trajectory += generated_text + f"\n[ENGINE_ERROR: {exc}]\n"
+            logger.warning(f"\n[OBSERVATION]\nENGINE ERROR: {exc}\n")
             break
 
         # Extract the observation text from the last history entry
@@ -300,30 +342,20 @@ def rollout_one_trajectory(
         if new_state.get("history"):
             observation = new_state["history"][-1].get("observation", "")
 
-        logger.info(f"    [Rollout step {step_i}] action={action_id} arg='{argument[:40]}' obs='{observation[:60]}'")
-
-        # ── APPEND TO TRAJECTORY TEXT ─────────────────────────────────────
-        # The agent token chunk: what the LLM physically typed
-        agent_chunk = generated_text + "\n"
-        # The environment observation chunk (masked later for loss computation)
-        env_chunk = f"Observation: {observation}\n"
-
-        full_trajectory += agent_chunk + env_chunk
+        logger.info(f"\n[OBSERVATION]\n{observation}\n")
 
         # ── UPDATE PROMPT FOR NEXT STEP ──────────────────────────────────
         # We rebuild from the formatted state so that all subqueries,
         # documents, and history reflect the new state correctly.
         state = new_state
-        next_state_prompt = format_state_for_prompt(state) + "\nAction:"
-        current_prompt = next_state_prompt
-        full_trajectory += current_prompt  # record new prompt boundary
+        current_prompt = format_state_for_prompt(state) + "\nAction: "
 
         # ── TERMINATION CHECK ────────────────────────────────────────────
         if state.get("status") in ("SOLVED", "FAILED"):
             logger.info(f"    [Rollout] Terminated with status={state['status']}")
             break
 
-    return full_trajectory, state, format_valid
+    return trajectory_steps, state, format_valid
 
 
 # Action-ID groupings for dashboard metrics
@@ -342,14 +374,16 @@ def rollout_batch(
     sample: Dict[str, Any],
     generation_config: GenerationConfig,
     device: torch.device,
-    num_generations: int = NUM_GENERATIONS
-) -> Tuple[List[str], List[float], List[Optional[GreenState]], Dict[str, Any]]:
+    num_generations: int = NUM_GENERATIONS,
+    joule_penalty_scale: float = JOULE_PENALTY_SCALE,
+    max_joule_penalty: float = MAX_JOULE_PENALTY,
+) -> Tuple[List[List[Dict[str, str]]], List[float], List[Optional[GreenState]], Dict[str, Any]]:
     """
     Generate NUM_GENERATIONS independent trajectories for one question.
 
     Returns
     -------
-    trajectories : List[str]          — Full trajectory strings
+    trajectories : List[List[Dict[str, str]]] — Full trajectory states and completions
     rewards      : List[float]        — Scalar reward per trajectory
     final_states : List[GreenState]   — Final states (for logging)
     metrics      : Dict[str, Any]     — Aggregated stats for dashboard logging
@@ -358,7 +392,7 @@ def rollout_batch(
     ground_truth = sample["answer"]
     corpus       = sample["corpus"]
 
-    trajectories: List[str]                  = []
+    trajectories: List[List[Dict[str, str]]] = []
     rewards:      List[float]                = []
     final_states: List[Optional[GreenState]] = []
     correct_flags: List[bool]                = []
@@ -371,6 +405,7 @@ def rollout_batch(
     }
 
     for gen_idx in range(num_generations):
+        logger.info(f"\n{'='*50}\nTRAJECTORY X-RAY (Gen {gen_idx+1}/{num_generations})\n{'='*50}")
         # Each trajectory gets a fresh state and a fresh engine
         retriever = GlobalRetriever.get_instance()
         engine    = GreenEngine(retriever=retriever)
@@ -380,7 +415,7 @@ def rollout_batch(
             model, tokenizer, engine, state, generation_config, device
         )
 
-        reward, is_correct = compute_reward(final_state, ground_truth, question, format_valid)
+        reward, is_correct = compute_reward(final_state, ground_truth, question, format_valid, joule_penalty_scale, max_joule_penalty)
 
         trajectories.append(traj)
         rewards.append(reward)
@@ -391,8 +426,11 @@ def rollout_batch(
         # Tally action usage from this trajectory's history
         history = final_state.get("history", []) if final_state else []
         steps_list.append(len(history))
+
+        traj_actions = []
         for item in history:
             aid = item.get("action_id", -1)
+            traj_actions.append(getattr(actions, 'get_action_name', lambda x: f"ACTION_{x}")(aid))
             if aid in _SEARCH_IDS:
                 action_totals["search"] += 1
             elif aid in _KEYWORD_IDS:
@@ -408,12 +446,16 @@ def rollout_batch(
             else:
                 action_totals["other"] += 1
 
-        logger.info(
-            f"  [Gen {gen_idx+1}/{NUM_GENERATIONS}] "
-            f"reward={reward:.3f}  correct={is_correct}  "
-            f"steps={len(history)}  "
-            f"status={final_state.get('status', 'N/A') if final_state else 'ERROR'}"
-        )
+        logger.info(f"\n{'='*50}\nSUMMARY\n{'='*50}")
+        traj_path = " -> ".join(traj_actions) if traj_actions else "(None)"
+        judge_status = "PASS" if is_correct else "FAIL"
+        joules_final = joules_list[-1]
+        
+        logger.info(f"[TRAJECTORY] {traj_path}")
+        logger.info(f"[JUDGE]      {judge_status}")
+        logger.info(f"[COST]       {joules_final:.1f} Joules")
+        logger.info(f"[REWARD]     {reward:.3f}")
+        logger.info(f"{'='*50}\n")
 
     # Compute per-step dashboard metrics
     total_actions = sum(action_totals.values()) or 1  # avoid div-by-zero
@@ -439,71 +481,57 @@ def rollout_batch(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _tokenize_with_agent_mask(
-    tokenizer,
-    trajectory: str,
+    step_data: Dict[str, Any],
     device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Tokenize a full trajectory string and build a loss mask that is 1
-    only on *agent-generated* tokens and 0 on environment text.
-
-    Strategy
-    --------
-    We exploit the fact that the trajectory string was built by alternating
-    agent chunks and environment/prompt chunks.  Each new prompt fragment
-    (from format_state_for_prompt) begins with "Goal:" — which we use as
-    the delimiter.  Any text that was NOT between an "Action:" boundary and
-    the following "Observation:" / "Goal:" boundary is treated as
-    environment text and masked out.
-
-    For simplicity and robustness we use a character-level approach:
-    build a binary char-mask first, then map to tokens.
+    Reconstruct the exact tensor the generator saw in Phase 1 to guarantee 
+    perfect token alignment. Build a loss mask covering the prompt with -100 
+    so we calculate gradients ONLY on the LLM's first generated token.
     """
-    encoding = tokenizer(
-        trajectory,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-        return_offsets_mapping=True, # <--- ADD THIS
-    )
-    input_ids = encoding.input_ids.to(device)  # (1, T)
-    attention_mask = encoding.attention_mask.to(device) # <--- Grab the mask here
-
-    # Build agent char-mask: 1 = agent generated, 0 = env / prompt
-    char_mask = [0] * len(trajectory)
-
-    # Find all [Action: ... Observation:] spans — these are the agent spans
-    # Pattern: everything from "Action:" up to the next "Observation:" or "Goal:"
-    for m in re.finditer(
-        r"Action:(.*?)(?=Observation:|Goal:|$)",
-        trajectory,
-        re.DOTALL,
-    ):
-        start, end = m.span(1)
-        for i in range(start, end):
-            char_mask[i] = 1
-
-    # Map char-mask → token-mask using char_to_token offsets
-    token_mask = torch.zeros(input_ids.shape[1], dtype=torch.bool)
-    offsets = encoding.encodings[0].offsets  # list of (char_start, char_end) per token
-    for tok_idx, (cs, ce) in enumerate(offsets):
-        if ce > cs and any(char_mask[c] for c in range(cs, ce)):
-            token_mask[tok_idx] = True
-
-    # Labels: copy input_ids, mask out non-agent tokens with -100
+    prompt_ids = step_data["prompt_ids"]
+    new_token_ids = step_data["new_token_ids"]
+    old_logprobs = step_data.get("old_logprobs", [])
+    
+    # 1. Rebuild the exact sequence the generator outputted
+    full_ids = prompt_ids + new_token_ids
+    
+    input_ids = torch.tensor([full_ids], dtype=torch.long, device=device)
+    attention_mask = torch.ones_like(input_ids, device=device)
+    
+    # 2. Mask the prompt (standard causal-LM labeling)
+    # labels[t] is the target token id at position t; the model's logits at
+    # position t-1 predict labels[t] after the usual shift in grpo_loss().
     labels = input_ids.clone()
-    labels[0, ~token_mask] = -100
+    prompt_len = len(prompt_ids)
+    labels[0, :prompt_len] = -100
 
-    return input_ids, labels, attention_mask
+    # 3. Massively speed up computation by slicing off the generated arguments.
+    # Keep only the first generated token (the action token) for GRPO updates.
+    keep_len = prompt_len + 1
+    input_ids = input_ids[:, :keep_len]
+    attention_mask = attention_mask[:, :keep_len]
+    labels = labels[:, :keep_len]
+
+    # Align old_logprobs (cached at sampling time during Phase 1)
+    gen_keep_len = keep_len - prompt_len
+    if gen_keep_len > 0 and len(old_logprobs) >= gen_keep_len:
+        old_lp_tensor = torch.stack(old_logprobs[:gen_keep_len]).unsqueeze(0).to(device)
+    else:
+        old_lp_tensor = torch.empty((1, 0), dtype=torch.float32, device=device)
+
+    return input_ids, labels, attention_mask, old_lp_tensor
 
 
 def grpo_loss(
     model,
     tokenizer,
-    trajectories: List[str],
+    trajectories: List[List[Dict[str, str]]],
     rewards: List[float],
     device: torch.device,
     batch_scale: float = 1.0,
+    kl_coef: float = KL_COEF,
+    clip_eps: float = CLIP_EPS,
 ) -> Tuple[torch.Tensor, float]:
     """
     Compute the GRPO policy-gradient loss for one group of trajectories.
@@ -518,93 +546,250 @@ def grpo_loss(
     """
     reward_tensor = torch.tensor(rewards, dtype=torch.float32)
 
-    # ── Group-Relative Advantage ────────────────────────────────────────────
+    # ── Variance Catastrophe Check ────────────────────────────────────────
     mean_r = reward_tensor.mean()
-    std_r  = reward_tensor.std() + 1e-8
-    advantages = (reward_tensor - mean_r) / std_r  # shape (G,)
+    std_r  = reward_tensor.std()
 
+    # ── Group-Relative Advantage ────────────────────────────────────────────
+    # Note: NORMALLY we would normalize this with the standard deviation. In previous testing we found this didn't work with the divisor on the 
+    # advantages like this. THIS IS AN EXPERIMENTAL CHANGE AND WE WILL NEED ALSO TO TEST WITHOUT.
+    advantages = (reward_tensor - mean_r) 
+    
+    # THE CEILING CLAMP: 
+    # If the batch is perfectly symmetrical and successful, the advantage vanishes to 0.0.
+    # We must inject a small positive advantage to keep the Policy Gradient active 
+    # so it can fight the KL penalty and maintain the SFT deviation.
+    # Initialize the stat tracker for this batch
+    clamp_fired = 0.0
+
+    if advantages.abs().max() < 1e-5 and mean_r > 0.5:
+        advantages = torch.ones_like(reward_tensor) * 0.1
+        clamp_fired = 1.0
+        logger.debug(f"Clipped gradients! (Mean Reward was {mean_r:.3f})")
+
+    
     total_loss = 0.0
     total_kl   = 0.0
-    num_valid  = 0
 
-    for traj, advantage in zip(trajectories, advantages):
-        input_ids, labels, attention_mask = _tokenize_with_agent_mask(tokenizer, traj, device)
-        T = input_ids.shape[1]
-
-        if T < 2:
-            continue
-
-        # Mask out any trajectory where the agent made NO decisions
-        if (labels != -100).sum() == 0:
-            continue
-
-        # ── Policy log-probs ───────────────────────────────────────────────
-        # Active policy forward pass (adapters ON)
-        model.set_adapter("active_rl")
-        outputs = model(input_ids, attention_mask=attention_mask)
-        logits  = outputs.logits     # (1, T, V)
-
-        # Reference forward pass: disable LoRA adapters to expose frozen base
-        model.set_adapter("reference")
-        with torch.no_grad():
-            ref_outputs = model(input_ids, attention_mask=attention_mask)
-            ref_logits  = ref_outputs.logits
-        
-        model.set_adapter("active_rl")
-
-        # Shift: predict token t+1 from position t
-        shift_logits     = logits[:, :-1, :]       # (1, T-1, V)
-        shift_ref_logits = ref_logits[:, :-1, :]
-        shift_labels     = labels[:, 1:]            # (1, T-1)
-
-        log_probs     = F.log_softmax(shift_logits,     dim=-1)
-        ref_log_probs = F.log_softmax(shift_ref_logits, dim=-1)
-
-        # Gather the log-prob of the actual token at each position
-        tok_logp     = log_probs.squeeze(0)                              # (T-1, V)
-        tok_ref_logp = ref_log_probs.squeeze(0)
-        shift_ids    = shift_labels.squeeze(0)                           # (T-1,)
-
-        # Only compute loss on agent tokens (labels != -100 after shift)
-        agent_mask = (shift_ids != -100)  # (T-1,)
-        if agent_mask.sum() == 0:
-            continue
-
-        chosen_logp     = tok_logp[agent_mask].gather(1, shift_ids[agent_mask].unsqueeze(1)).squeeze(1)
-        chosen_ref_logp = tok_ref_logp[agent_mask].gather(1, shift_ids[agent_mask].unsqueeze(1)).squeeze(1)
-
-        # ── Clipped Surrogate (PPO-style) ──────────────────────────────────
-        log_ratio = chosen_logp - chosen_ref_logp.detach()
-        ratio     = log_ratio.exp()
-        adv_scalar = advantage.to(device)
-
-        pg_loss1 = -adv_scalar * ratio
-        pg_loss2 = -adv_scalar * torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS)
-        pg_loss  = torch.max(pg_loss1, pg_loss2).mean()
-
-        # ── KL Penalty (keeps policy close to reference) ───────────────────
-        # DeepSeek GRPO uses a strictly positive KL estimator to fix negative variance:
-        # KL ≈ (π_ref / π) - log(π_ref / π) - 1
-        # Let log_ratio = log(π / π_ref). Then log(π_ref / π) = -log_ratio
-        kl = (torch.exp(-log_ratio) + log_ratio - 1.0).mean()
-        kl_loss = KL_COEF * kl
-
-        traj_loss = pg_loss + kl_loss
-        
-        # Backward pass per trajectory to save memory
-        # We divide by len(trajectories) acting as num_valid surrogate
-        scaled_traj_loss = (traj_loss / len(trajectories)) / batch_scale
-        scaled_traj_loss.backward()
-
-        total_loss += traj_loss.item()
-        total_kl += kl.item()
-        num_valid += 1
-
+    # Pre-calculate how many trajectories are actually valid to scale gradients correctly
+    num_valid = sum(1 for traj in trajectories if len(traj) > 0)
     if num_valid == 0:
         logger.warning("  [GRPO] No valid trajectories in this batch!")
         return 0.0, 0.0
 
-    return (total_loss / num_valid) / batch_scale, (total_kl / num_valid)
+    for traj, advantage in zip(trajectories, advantages):
+        # We calculate the step-losses manually and sum them for the trajectory
+        traj_loss = 0.0
+        traj_kl = 0.0
+        traj_valid = 0
+
+        for step_data in traj:
+            # 1. Use the EXACT token lists generated in Phase 1 (bypassing the tokenizer)
+            #    so that no colon-space merges misalign our labels vs outputs!
+            input_ids, labels, attention_mask, cached_old_logp = _tokenize_with_agent_mask(step_data, device)
+            T = input_ids.shape[1]
+
+            if T < 2:
+                continue
+
+            # Mask out any sequence where the agent made NO decisions
+            if (labels != -100).sum() == 0:
+                continue
+
+            # ── [DEBUG] Backprop X-Ray ──────────────────────────────────────
+            # Write to a secondary file exactly what tokens the model sees
+            # as context, and exactly the target action token being reinforced.
+            bp_log_file = LOG_FILE.replace(".log", "_backprop.txt")
+            with open(bp_log_file, "a", encoding="utf-8") as f:
+                mask = (labels[0] != -100)
+                positions = mask.nonzero(as_tuple=False)
+                num_targets = mask.sum().item()
+
+                f.write(f"\n{'='*60}\n")
+                f.write(f"BACKPROP X-RAY (Advantage: {advantage.item():.4f})\n")
+                f.write(f"{'='*60}\n")
+
+                # --- Structural checks ---
+                f.write(f"[SUPERVISED POSITION]: {positions.tolist()}\n")
+
+                if num_targets != 1:
+                    f.write(f"[WARNING] Expected 1 target token, got {num_targets}\n")
+
+                if num_targets == 1:
+                    t = positions[0].item()
+
+                # --- Extract tokens ---
+                ctx_ids = input_ids[0, ~mask].tolist()
+                tgt_ids = input_ids[0, mask].tolist()
+
+                f.write(f"[CONTEXT TOKEN IDS]: {ctx_ids}\n")
+                f.write(f"[TARGET TOKEN IDS]: {tgt_ids}\n")
+
+                # --- Safe decode ---
+                def safe_decode(ids):
+                    try:
+                        return tokenizer.decode(ids, skip_special_tokens=False)
+                    except Exception as e:
+                        return f"<DECODE ERROR: {e}>"
+
+                f.write(f"[CONTEXT TEXT]:\n{repr(safe_decode(ctx_ids))}\n\n")
+                f.write(f"[TARGET TEXT]:\n{repr(safe_decode(tgt_ids))}\n\n")
+
+                # --- Annotated sequence (preserves ordering) ---
+                annotated = []
+                for i in range(input_ids.shape[1]):
+                    tok = input_ids[0, i].item()
+                    marker = "T" if mask[i] else "C"
+                    annotated.append(f"{tok}:{marker}")
+                f.write(f"[ANNOTATED SEQUENCE]: {' '.join(annotated)}\n")
+
+                # --- Model prediction sanity check ---
+                if num_targets == 1:
+                    with torch.no_grad():
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                        logits = outputs.logits
+
+                    pred_token = logits[0, t].argmax(dim=-1).item()
+                    f.write(f"[MODEL ARGMAX @ POS]: {pred_token} ({repr(safe_decode([pred_token]))})\n")
+
+                # --- NaN checks ---
+                if torch.isnan(input_ids).any():
+                    f.write("[ERROR] NaNs in input_ids\n")
+                if torch.isnan(labels).any():
+                    f.write("[ERROR] NaNs in labels\n")
+
+                # --- (Optional) log old logprob if available ---
+                if cached_old_logp is not None:
+                    try:
+                        f.write(f"[OLD LOGPROB]: {cached_old_logp.item():.4f}\n")
+                    except Exception:
+                        f.write(f"[OLD LOGPROB]: {cached_old_logp}\n")
+            # ── Policy log-probs ───────────────────────────────────────────────
+            # ── Reference Policy Log-probs ──────────────────────────────────
+            # Evaluate the reference model FIRST and under no_grad() so we can free 
+            # its massive activation footprint before evaluating the active policy.
+            was_training = model.training
+            model.set_adapter("reference")
+            model.eval()
+            with torch.no_grad():
+                ref_outputs = model(input_ids, attention_mask=attention_mask, use_cache=False)
+                ref_logits  = ref_outputs.logits
+                shift_ref_logits = ref_logits[:, :-1, :]
+                ref_log_probs = F.log_softmax(shift_ref_logits, dim=-1)
+                
+                # Gather log-probs for actual generated tokens
+                shift_labels = labels[:, 1:]
+                shift_ids = shift_labels.squeeze(0)
+                agent_mask = (shift_ids != -100)
+                
+                if agent_mask.sum() == 0:
+                    continue
+                    
+                tok_ref_logp = ref_log_probs.squeeze(0)
+                chosen_ref_logp = tok_ref_logp[agent_mask].gather(1, shift_ids[agent_mask].unsqueeze(1)).squeeze(1)
+
+            # Explicitly delete massive reference tensors mapping entire vocab dimensions
+            del ref_outputs, ref_logits, shift_ref_logits, ref_log_probs, tok_ref_logp
+            
+            # ── Active Policy Log-probs ─────────────────────────────────────
+            # MUST use train() mode! HuggingFace `gradient_checkpointing` silently
+            # disables itself and hoards activations if `model.training` is False!
+            model.set_adapter("active_rl")
+            model.train() 
+            outputs = model(input_ids, attention_mask=attention_mask, use_cache=False)
+            logits  = outputs.logits     # (1, T, V)
+
+            # Shift: predict token t+1 from position t
+            shift_logits     = logits[:, :-1, :]       # (1, T-1, V)
+            log_probs     = F.log_softmax(shift_logits, dim=-1)
+
+            # Gather the log-prob of the actual token at each position
+            tok_logp     = log_probs.squeeze(0)                              # (T-1, V)
+            chosen_logp     = tok_logp[agent_mask].gather(1, shift_ids[agent_mask].unsqueeze(1)).squeeze(1)
+
+            # ── PPO-style Ratio ────────────────────────────────────────────────
+            # Ratio for PPO clip must be w.r.t. the OLD policy used during sampling.
+            # We cached per-token logprobs at sampling time in Phase 1 (old_logprobs).
+            if cached_old_logp is None or cached_old_logp.numel() == 0:
+                logger.warning("  [GRPO] Missing cached old_logprobs for PPO ratio; skipping step.")
+                continue
+
+            # Align cached old_logprobs (generation-space) to the supervised tokens (shift-space).
+            # shift index i corresponds to original token position (i+1).
+            prompt_len = len(step_data["prompt_ids"])
+            agent_pos = agent_mask.nonzero(as_tuple=False).squeeze(1)  # positions in 0..T-2
+            gen_pos = (agent_pos + 1) - prompt_len                     # 0-based index into generation
+
+            valid = (gen_pos >= 0) & (gen_pos < cached_old_logp.shape[1])
+            if valid.sum().item() == 0:
+                logger.warning("  [GRPO] No valid old_logprob alignment for this step; skipping.")
+                continue
+
+            # Filter to only positions we can align
+            chosen_logp = chosen_logp[valid]
+            chosen_ref_logp = chosen_ref_logp[valid]
+            old_logp = cached_old_logp[0, gen_pos[valid]].to(device)
+
+            # Sanity check: Alignment mapping validation
+            with torch.no_grad():
+                debug_tok_logp = log_probs.squeeze(0)
+                debug_chosen = debug_tok_logp[agent_mask].gather(1, shift_ids[agent_mask].unsqueeze(1)).squeeze(1)
+                debug_chosen = debug_chosen[valid]
+                diff = (debug_chosen - old_logp).abs().mean().item()
+                if diff > 0.1:
+                    logger.warning(f"  [CRITICAL ALIGNMENT CHECK] Δ={diff:.6f} - Alignment drift detected!")
+
+            assert chosen_logp.shape == old_logp.shape, f"chosen_logp: {chosen_logp.shape} != old_logp: {old_logp.shape}"
+
+            token_count = chosen_logp.numel()
+            if token_count == 0:
+                logger.warning("  [GRPO] Zero supervised tokens after alignment; skipping step.")
+                continue
+
+            ratio = torch.exp(chosen_logp - old_logp.detach())
+            adv_scalar = advantage.to(device)
+
+            pg_loss1 = -adv_scalar * ratio
+            pg_loss2 = -adv_scalar * torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+            # Average over supervised tokens:
+            pg_loss = torch.max(pg_loss1, pg_loss2).sum() / token_count
+
+            # ── KL Penalty (DeepSeek GRPO estimator) ───────────────────────────
+            # We want to keep the policy close to the reference model.
+            kl_log_ratio = chosen_logp - chosen_ref_logp.detach()
+            # This uses the DeepSeek exact unbiased GRPO estimator: (pi_ref / pi_theta) - log(pi_ref / pi_theta) - 1
+            kl = (torch.exp(-kl_log_ratio) + kl_log_ratio - 1.0).sum() / token_count
+            kl_loss = kl_coef * kl
+
+            # Sanity checks (Ratio distribution and Magnitudes)
+            ratio_std = ratio.std(unbiased=False).item() if ratio.numel() > 1 else 0.0
+            logger.debug(f"  [Sanity] ratio mean: {ratio.mean().item():.4f} std: {ratio_std:.4f}")
+            logger.debug(f"  [Sanity] PG: {pg_loss.item():.4f} KL: {kl_loss.item():.4f}")
+
+            # BACKPROP OOM FIX: Compute scaled loss for this individual token/step 
+            # and immediately free the computation graph up so that back-to-back
+            # steps within the trajectory do not endlessly add up in VRAM!
+            step_scale = 1.0 / (len(traj) * num_valid * batch_scale)
+            scaled_step_loss = (pg_loss + kl_loss) * step_scale
+            scaled_step_loss.backward()
+
+            # Clean up massive tensors IMMEDIATELY
+            del outputs, logits, shift_logits, log_probs, tok_logp, chosen_logp
+            torch.cuda.empty_cache()
+
+            traj_loss += (pg_loss.item() + kl_loss.item()) / len(traj)
+            traj_kl += kl.item() / len(traj)
+            traj_valid += 1
+            
+        if traj_valid > 0:
+            total_loss += traj_loss
+            total_kl += traj_kl
+            
+    # We return the unscaled mean loss for accurate logging
+    mean_loss = total_loss / num_valid
+    mean_kl = total_kl / num_valid
+
+    return mean_loss, mean_kl
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -652,24 +837,21 @@ def main():
 
     # ── 0. Dashboard init ────────────────────────────────────────────────────
     if USE_WANDB:
-        wandb.init(
-            project=WANDB_PROJECT,
-            name=WANDB_RUN_NAME,
-            config={
-                "num_generations":   NUM_GENERATIONS,
-                "batch_size":        BATCH_SIZE,
-                "max_steps_per_traj": MAX_STEPS_PER_TRAJ,
-                "learning_rate":     LEARNING_RATE,
-                "kl_coef":           KL_COEF,
-                "clip_eps":          CLIP_EPS,
-                "joule_penalty_scale": JOULE_PENALTY_SCALE,
-                "max_joule_penalty": MAX_JOULE_PENALTY,
-                "format_consolation": FORMAT_CONSOLATION_REWARD,
-                "model_path":        SFT_MODEL_PATH,
-            },
-        )
+        wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
+        # Pull the injected parameters from the sweep (with fallbacks to your defaults)
+        config = wandb.config
+        lr = config.get("learning_rate", LEARNING_RATE)
+        kl = config.get("kl_coef", KL_COEF)
+        beta1 = config.get("adam_beta1", 0.9)
+        eps = config.get("clip_eps", CLIP_EPS)
+        joule_scale = config.get("joule_penalty_scale", JOULE_PENALTY_SCALE)
+        max_joule   = config.get("max_joule_penalty", MAX_JOULE_PENALTY)
         if wandb.run is not None:
             logger.info(f"W&B run: {wandb.run.url}")
+    else:
+        lr, kl, beta1, eps = LEARNING_RATE, KL_COEF, 0.9, CLIP_EPS
+        joule_scale = JOULE_PENALTY_SCALE
+        max_joule   = MAX_JOULE_PENALTY
 
     # ── 1. Detect checkpoint ─────────────────────────────────────────────────
     ckpt_path, start_step = find_latest_checkpoint(OUTPUT_DIR)
@@ -717,6 +899,14 @@ def main():
         is_trainable=True
     )
     
+    # ── Mute ALL dropout layers ───────────
+    # In RLHF (unlike SFT), 5% LoRA dropout brutally destabilizes the PPO ratio 
+    # resulting in a false "Alignment Drift" up to ~0.20 when comparing the 
+    # clean Phase 1 outputs to the noisy Phase 2 logits. Shutting it off.
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
+            
     # Set the active adapter as default and enable gradients
     model.set_adapter("active_rl")
     model.print_trainable_parameters()
@@ -735,10 +925,10 @@ def main():
 
     # ── 4. Generation Config (used inside the rollout loop) ──────────────────
     generation_config = GenerationConfig(
-        do_sample=True,
-        top_p=0.9,
-        temperature=1.0,
-        repetition_penalty=1.2,
+        do_sample=True, 
+        temperature=0.5, # lowering this
+        # top_p=0.9,
+        # repetition_penalty=1.2,
         max_new_tokens=MAX_NEW_TOKENS,
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id,
@@ -752,7 +942,8 @@ def main():
     # ── 5. Optimizer ─────────────────────────────────────────────────────────
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=LEARNING_RATE,
+        lr=lr,
+        betas=(float(beta1), 0.999)
     )
     logger.info(f"Training will run steps {start_step + 1} → {TOTAL_STEPS}")
 
@@ -775,6 +966,19 @@ def main():
         }
     }
 
+    if OVERFIT_MODE:
+        logger.info("CRITICAL WARNING: OVERFIT_MODE is ENABLED. Training on 2 questions only!")
+        active_datasets = ["hotpot"]
+        dataset_weights = [1.0]
+        dataset_configs["hotpot"]["split"] = "train" 
+        dataset_configs["hotpot"]["filter_ids"] = [
+            "5ab9257b554299753720f749",  # boing/dawkins one
+            "5a70fb2d5542994082a3e482"   # san jose del cabo one
+        ]
+        
+    if ONLY_EASY_MODE and not OVERFIT_MODE:
+        logger.info("ONLY_EASY_MODE is ENABLED. Training only on 'easy' difficulty HotpotQA questions.")
+        dataset_configs["hotpot"]["level"] = "easy"
 
     streamer = MixedStreamer(
         dataset_names=active_datasets, 
@@ -786,23 +990,27 @@ def main():
     data_iter = streamer.stream()
 
     # Create Eval Streamer
+    eval_configs = {
+        "hotpot": {
+            "setting": "fullwiki",
+            "split": "validation" # Use validation split for eval
+        },
+        "musique": {
+            "setting": "fullwiki",
+            "split": "validation"
+        },
+        "twowiki": {
+            "setting": "fullwiki",
+            "split": "validation"
+        }
+    }
+    if ONLY_EASY_MODE and not OVERFIT_MODE:
+        eval_configs["hotpot"]["level"] = "easy"
+
     eval_streamer = MixedStreamer(
         dataset_names=active_datasets,
         limit=EVAL_SAMPLES,
-        configs={
-            "hotpot": {
-                "setting": "fullwiki",
-                "split": "validation" # Use validation split for eval
-            },
-            "musique": {
-                "setting": "fullwiki",
-                "split": "validation"
-            },
-            "twowiki": {
-                "setting": "fullwiki",
-                "split": "validation"
-            }
-        }
+        configs=eval_configs
     )
     eval_iter = eval_streamer.stream()
 
@@ -815,6 +1023,8 @@ def main():
     accum_loss  = 0.0
     accum_kl    = 0.0
     accum_steps = 0
+    from collections import deque
+    acc_window = deque(maxlen=5) 
 
     for step in range(start_step, TOTAL_STEPS):
         # ── Collect one batch of questions ──────────────────────────────────
@@ -825,47 +1035,82 @@ def main():
             except StopIteration:
                 logger.info("Dataset exhausted — restarting.")
                 data_iter = streamer.stream()
-                batch_samples.append(next(data_iter))
+                try:
+                    batch_samples.append(next(data_iter))
+                except StopIteration:
+                    logger.error("Dataset produced 0 items! Stopping training to prevent loops.")
+                    raise RuntimeError("Dataset is completely empty.")
 
         logger.info(f"\n{'='*60}")
         logger.info(f"Step {step+1}/{TOTAL_STEPS}")
+
+        # Track metrics for the whole batch
+        batch_metrics_list = []
+        clamp_fired_this_step = 0.0
 
         for sample in batch_samples:
             q = sample["question"]
             logger.info(f"  Q: {q[:80]}")
 
             # ── Phase 1: Rollout ─────────────────────────────────────────────
-            trajectories, rewards, final_states, batch_metrics = rollout_batch(
-                model, tokenizer, sample, generation_config, device
+            trajectories, rewards, final_states, single_q_metrics = rollout_batch(
+                model, tokenizer, sample, generation_config, device,
+                joule_penalty_scale=joule_scale, max_joule_penalty=max_joule
             )
 
-            mean_r = batch_metrics["reward/mean"]
+            # Store metrics to average later
+            batch_metrics_list.append(single_q_metrics)
+
+            mean_r = single_q_metrics["reward/mean"]
             logger.info(
                 f"  Rewards: {[f'{r:.3f}' for r in rewards]}  mean={mean_r:.3f}  "
-                f"accuracy={batch_metrics['accuracy/mean']:.2f}  "
-                f"joules={batch_metrics['cost/mean_joules']:.3f}  "
-                f"tool% search={batch_metrics['tool_pct/search']:.2f} "
-                f"kw={batch_metrics['tool_pct/keyword']:.2f} "
-                f"dense={batch_metrics['tool_pct/dense']:.2f} "
-                f"verify={batch_metrics['tool_pct/verify']:.2f} "
-                f"rewrite={batch_metrics['tool_pct/rewrite']:.2f}"
+                f"accuracy={single_q_metrics['accuracy/mean']:.2f}  "
+                f"joules={single_q_metrics['cost/mean_joules']:.3f}  "
+                f"tool% search={single_q_metrics['tool_pct/search']:.2f} "
+                f"kw={single_q_metrics['tool_pct/keyword']:.2f} "
+                f"dense={single_q_metrics['tool_pct/dense']:.2f} "
+                f"verify={single_q_metrics['tool_pct/verify']:.2f} "
+                f"rewrite={single_q_metrics['tool_pct/rewrite']:.2f}"
             )
 
-            # ── Dashboard logging ────────────────────────────────────────────
-            if USE_WANDB:
-                wandb.log({**batch_metrics, "train/grpo_step": step + 1}, step=step + 1)
+            # Check if clamp fired for THIS question
+            _rew_tensor = torch.tensor(rewards, dtype=torch.float32)
+            _mean_r = _rew_tensor.mean()
+            if (_rew_tensor - _mean_r).abs().max() < 1e-5 and _mean_r > 0.5:
+                clamp_fired_this_step = 1.0  # If either question clamps, flag the step
+                logger.debug(f"Clipped gradients! (Mean Reward was {_mean_r:.3f})")
 
             # ── Phase 2: GRPO Loss ───────────────────────────────────────────
             # We pass scale to grpo_loss, which handles the localized backward passes!
             scaled_loss, mean_kl = grpo_loss(
                 model, tokenizer, trajectories, rewards, device,
-                batch_scale=len(batch_samples) * GRADIENT_ACCUM
+                batch_scale=len(batch_samples) * GRADIENT_ACCUM,
+                kl_coef=kl,
+                clip_eps=eps
             )
             logger.info(f"  GRPO scaled loss: {scaled_loss:.4f}  KL: {mean_kl:.4f}")
 
             # Track the scalar loss for logging
             accum_loss += scaled_loss
             accum_kl += mean_kl
+
+        # ── AGGREGATE & LOG TO W&B (Outside the sample loop) ──
+        # Average all keys across the questions in the batch
+        avg_metrics = {}
+        if batch_metrics_list:
+            for key in batch_metrics_list[0].keys():
+                avg_metrics[key] = sum(m[key] for m in batch_metrics_list) / len(batch_metrics_list)
+
+        # Calculate Moving Average & Stability using the TRUE batch average
+        raw_batch_acc = avg_metrics.get("accuracy/mean", 0.0)
+        acc_window.append(raw_batch_acc)
+        stability_score = float(np.mean(acc_window) - np.std(acc_window))
+        
+        avg_metrics["accuracy/stability_score"] = stability_score
+        avg_metrics["stats/ceiling_clamp_fired"] = clamp_fired_this_step
+
+        if USE_WANDB:
+            wandb.log({**avg_metrics, "train/grpo_step": step + 1}, step=step + 1)
 
         accum_steps += 1
 
@@ -916,7 +1161,8 @@ def main():
             for eval_sample in eval_samples:
                 logger.info(f"  [Eval] Q: {eval_sample['question'][:80]}")
                 _, _, _, batch_metrics = rollout_batch(
-                    model, tokenizer, eval_sample, generation_config, device, num_generations=1
+                    model, tokenizer, eval_sample, generation_config, device, num_generations=1,
+                    joule_penalty_scale=joule_scale, max_joule_penalty=max_joule
                 )
                 eval_accuracy += batch_metrics['accuracy/mean']
                 logger.info(f"  [Eval] Acc: {batch_metrics['accuracy/mean']:.2f}")

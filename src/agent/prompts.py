@@ -3,7 +3,7 @@ from typing import Any, Dict
 def format_state_for_prompt(state):
    """
    Reconstructs the exact input prompt from the saved state dictionary.
-   Now includes DOCUMENTS/CONTEXT so the model can actually answer!
+   Includes DOCUMENTS/CONTEXT so the model can see what information it has access to when making decisions.
    """
    # 1. Header
    # Uses .get('question') which matches your JSON's "question" key
@@ -50,7 +50,7 @@ def format_state_for_prompt(state):
    
    prompt += """
 AVAILABLE ACTIONS:
-Type only the corresponding action ID (0-9) and provide the required input as specified.
+Type only the corresponding action ID (0-9).
 ------------------
 [0] GEN_SLM (Answer Question with Small LLM)
    - Usage: You have sufficient information to answer the Main Goal.

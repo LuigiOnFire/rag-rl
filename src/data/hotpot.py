@@ -13,12 +13,14 @@ class HotpotQAStreamer(BaseStreamer):
     Streams the HotpotQA dataset for the GreenRAG Oracle.
     Supports both 'distractor' (sandbox) and 'fullwiki' (online/real-world) settings.
     """
-    def __init__(self, setting: str = "distractor", split: str = "train", limit: Optional[int] = None):        
+    def __init__(self, setting: str = "distractor", split: str = "train", limit: Optional[int] = None, filter_ids: Optional[List[str]] = None, level: Optional[str] = None):        
         """
         Args:
             setting: 'distractor' (provides 10 paragraphs) or 'fullwiki' (provides only Q&A)
             split: 'train', 'validation', or 'test'
             limit: If set, only load the first N samples (useful for debugging)
+            filter_ids: If set, only load samples matching these exact IDs
+            level: If set, only load samples with this difficulty level (e.g. "easy", "medium", "hard")
         """
         if setting not in ["distractor", "fullwiki"]:
             raise ValueError("Setting must be 'distractor' or 'fullwiki'")
@@ -26,12 +28,25 @@ class HotpotQAStreamer(BaseStreamer):
         self.setting = setting
         self.split = split
         self.limit = limit
+        self.filter_ids = filter_ids
+        self.level = level
         self.dataset: Optional[Any] = None
             
         try:
             logger.info(f"Loading HotpotQA ({setting}) split='{split}'...")
             # We dynamically pass the setting here
             self.dataset = load_dataset("hotpot_qa", self.setting, split=self.split, trust_remote_code=True) 
+
+            if self.filter_ids:
+                self.dataset = self.dataset.filter(lambda x: x['id'] in self.filter_ids)
+                if len(self.dataset) == 0:
+                    logger.warning(f"Filter matched 0 items in split '{split}'! You may be filtering on the wrong split or IDs are incorrect.")
+
+            if self.level:
+                self.dataset = self.dataset.filter(lambda x: x.get('level') == self.level)
+                if len(self.dataset) == 0:
+                    logger.warning(f"Level filter matched 0 items in split '{split}' for level '{self.level}'!")
+
             self.total_size: int = len(self.dataset)  # full dataset size before any limit
             
             if self.limit:

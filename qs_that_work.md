@@ -1,0 +1,2 @@
+what city other than san jose del cabo is at southern tip of baja california peninsula and is also encompassed in los cabos municipality
+who introduced ultimate boeing 747 gambit in response to idea that there must be god if there appears to be deliberate design in natural world
