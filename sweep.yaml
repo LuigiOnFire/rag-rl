@@ -1,29 +1,32 @@
 program: scripts/05_train_grpo.py
 method: bayes
 metric:
-  name: accuracy/stability_score
+  name: accuracy/cumulative
   goal: maximize
 parameters:
+  # Don't touch these
+  clip_eps:
+    value: 0.2
+  adam_beta1:
+    value: 0.9
+  # Tune these
   learning_rate:
     distribution: log_uniform_values
-    min: 2e-6
+    min: 5e-6
     max: 5e-5
   kl_coef:
     distribution: uniform
     min: 0.008
     max: 0.02
-  clip_eps:
-    value: 0.2
-  adam_beta1:
-    value: 0.9
+  
   joule_penalty_scale:
     distribution: uniform
-    min: 0.005
-    max: 0.1
+    min: 0.0
+    max: 0.06
   max_joule_penalty:
     distribution: uniform
-    min: 0.05
-    max: 0.5
+    min: 0.0
+    max: 0.3
 command:
   - ${env}
   - .venv/bin/python

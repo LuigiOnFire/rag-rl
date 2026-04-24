@@ -69,27 +69,27 @@ SFT_MODEL_PATH       = "models/green-rag-sft-v1"
 OUTPUT_DIR           = "models/green-rag-grpo-v1"
 
 # Rollout config
-NUM_GENERATIONS      = 8     # Trajectories per question (the "group" in GRPO)
+NUM_GENERATIONS      = 4     # Trajectories per question (the "group" in GRPO)
 BATCH_SIZE           = 2     # Questions per outer training step
 MAX_STEPS_PER_TRAJ   = 8     # Max engine steps before forcing termination
 MAX_NEW_TOKENS       = 4     # Tokens generated per LLM call inside the loop
 
 # Training config
-TOTAL_STEPS          = 15   # Training steps (each step = one batch of questions)
-LEARNING_RATE        = 8e-7
+TOTAL_STEPS          = 300   # Training steps (each step = one batch of questions)
+LEARNING_RATE        = 6.5e-6
 GRADIENT_ACCUM       = 1
-KL_COEF              = 0.001  # β — KL penalty coefficient (keeps policy close to ref)
+KL_COEF              = 0.015  # β — KL penalty coefficient (keeps policy close to ref)
 CLIP_EPS             = 0.2    # ε — PPO-style clipping (applied inside GRPO loss)
 
 # Reward config
 FORMAT_CONSOLATION_REWARD = 0.0   # Reward for valid format but wrong answer
-JOULE_PENALTY_SCALE       = 0.01  # Multiply total_joules by this to get the penalty
+JOULE_PENALTY_SCALE       = 0.04  # Multiply total_joules by this to get the penalty
 MAX_JOULE_PENALTY         = 0.20   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
 
 # Dataset config
 MAX_QUESTIONS = None   # Cap on how many examples to draw from the dataset (None = unlimited)
-OVERFIT_MODE  = True   # Set to True to train repeatedly on two specific questions
-ONLY_EASY_MODE = False  # Set to True to train only on 'level == easy' questions from HotpotQA
+OVERFIT_MODE  = False  # Set to True to train repeatedly on two specific questions
+ONLY_EASY_MODE = True  # Set to True to train only on 'level == easy' questions from HotpotQA
 
 # Checkpoint / logging
 SAVE_EVERY    = 25   # Save every N steps — keep low to minimise work lost on crash
@@ -945,7 +945,6 @@ def main():
         lr=lr,
         betas=(float(beta1), 0.999)
     )
-    logger.info(f"Training will run steps {start_step + 1} → {TOTAL_STEPS}")
 
     # ── 6. Dataset ───────────────────────────────────────────────────────────
     active_datasets = ["hotpot", "musique", "twowiki"]
@@ -977,8 +976,16 @@ def main():
         ]
         
     if ONLY_EASY_MODE and not OVERFIT_MODE:
-        logger.info("ONLY_EASY_MODE is ENABLED. Training only on 'easy' difficulty HotpotQA questions.")
+        logger.info("ONLY_EASY_MODE is ENABLED. Training only on the first 100 'easy' difficulty HotpotQA questions.")
+        active_datasets = ["hotpot"]
+        dataset_weights = [1.0]
         dataset_configs["hotpot"]["level"] = "easy"
+        MAX_QUESTIONS = 100
+        
+        # Override steps for exactly 3 epochs across the 100 questions
+        global TOTAL_STEPS
+        TOTAL_STEPS = (MAX_QUESTIONS // BATCH_SIZE) * 3
+        logger.info(f"  => Adjusted TOTAL_STEPS to {TOTAL_STEPS} for exactly 3 epochs!")
 
     streamer = MixedStreamer(
         dataset_names=active_datasets, 
@@ -988,6 +995,8 @@ def main():
     )
     print(f"Streaming {streamer.n_limit} samples from: {', '.join(active_datasets)}")
     data_iter = streamer.stream()
+
+    logger.info(f"Training will run steps {start_step + 1} → {TOTAL_STEPS}")
 
     # Create Eval Streamer
     eval_configs = {
@@ -1026,6 +1035,11 @@ def main():
     from collections import deque
     acc_window = deque(maxlen=5) 
 
+    cumulative_accuracy = 0.0
+    steps_to_converge = TOTAL_STEPS
+    
+    global_q_step = start_step * BATCH_SIZE
+
     for step in range(start_step, TOTAL_STEPS):
         # ── Collect one batch of questions ──────────────────────────────────
         batch_samples = []
@@ -1060,6 +1074,16 @@ def main():
 
             # Store metrics to average later
             batch_metrics_list.append(single_q_metrics)
+
+            global_q_step += 1
+            if USE_WANDB:
+                # Log on a question-to-question basis without tying it to the gradient step
+                wandb.log({
+                    "q/accuracy": single_q_metrics["accuracy/mean"],
+                    "q/reward": single_q_metrics["reward/mean"],
+                    "q/joules": single_q_metrics["cost/mean_joules"],
+                    "train/global_q_step": global_q_step
+                }, step=global_q_step)
 
             mean_r = single_q_metrics["reward/mean"]
             logger.info(
@@ -1105,12 +1129,18 @@ def main():
         raw_batch_acc = avg_metrics.get("accuracy/mean", 0.0)
         acc_window.append(raw_batch_acc)
         stability_score = float(np.mean(acc_window) - np.std(acc_window))
+
+        cumulative_accuracy += raw_batch_acc
+        if stability_score > 0.99 and steps_to_converge == TOTAL_STEPS:
+            steps_to_converge = step + 1
+            logger.info(f"  [Milestone] Perfect Stability reached at step {steps_to_converge}!")
         
         avg_metrics["accuracy/stability_score"] = stability_score
+        avg_metrics["accuracy/cumulative"] = cumulative_accuracy 
         avg_metrics["stats/ceiling_clamp_fired"] = clamp_fired_this_step
 
         if USE_WANDB:
-            wandb.log({**avg_metrics, "train/grpo_step": step + 1}, step=step + 1)
+            wandb.log({**avg_metrics, "train/grpo_step": step + 1}, step=global_q_step)
 
         accum_steps += 1
 
@@ -1129,7 +1159,7 @@ def main():
                 wandb.log({
                     "train/loss": accum_loss / GRADIENT_ACCUM,
                     "train/kl":   accum_kl / GRADIENT_ACCUM
-                }, step=step + 1)
+                }, step=global_q_step)
             accum_loss = 0.0
             accum_kl   = 0.0
 
@@ -1171,7 +1201,7 @@ def main():
                 mean_eval_acc = eval_accuracy / len(eval_samples)
                 logger.info(f"  => Mean Evaluation Accuracy: {mean_eval_acc:.4f}")
                 if USE_WANDB:
-                    wandb.log({"eval/accuracy": mean_eval_acc}, step=step + 1)
+                    wandb.log({"eval/accuracy": mean_eval_acc}, step=global_q_step)
             
             model.train() # Set back to train mode!
             logger.info(f"{'='*60}")
@@ -1184,6 +1214,7 @@ def main():
     logger.info(f"\nTraining complete. Model saved to {OUTPUT_DIR}")
 
     if USE_WANDB:
+        wandb.run.summary["metrics/steps_to_converge"] = steps_to_converge # ADD THISs
         wandb.finish()
 
 
