@@ -79,15 +79,18 @@ class OracleSearch(OracleInterface):
             if self.force_decompose:
                 return [
                     actions.ACTION_DEC_LLM,
+                    actions.ACTION_DEC_RSN,
                 ]
             else:
                 return [
-                    actions.ACTION_RET_KEY, 
-                    actions.ACTION_RET_VEC, 
-                    actions.ACTION_DEC_SLM,
+                    actions.ACTION_RET_KEY,
+                    actions.ACTION_RET_VEC,
+                    actions.ACTION_RSN_SLM,
+                    actions.ACTION_RSN_LLM,
                     actions.ACTION_DEC_LLM,
-                    actions.ACTION_GEN_SLM, 
-                    actions.ACTION_GEN_LLM
+                    actions.ACTION_DEC_RSN,
+                    actions.ACTION_GEN_SLM,
+                    actions.ACTION_GEN_LLM,
                 ]
 
         # 3. MIDDLE OF TURN
@@ -95,28 +98,18 @@ class OracleSearch(OracleInterface):
             # FOR DEBUGGING
             # Base actions always available
             valid = [
-                actions.ACTION_RET_KEY, 
-                actions.ACTION_RET_VEC, 
-                actions.ACTION_GEN_SLM, 
-                actions.ACTION_GEN_LLM
+                actions.ACTION_RET_KEY,
+                actions.ACTION_RET_VEC,
+                actions.ACTION_RSN_SLM,
+                actions.ACTION_RSN_LLM,
+                actions.ACTION_GEN_SLM,
+                actions.ACTION_GEN_LLM,
             ]
-
-            # LOGIC FIX: Only allow GRADE if we just RETRIEVED
-            # otherwise, what are we grading?
-            retrieval_ids = [actions.ACTION_RET_KEY, actions.ACTION_RET_VEC]
-            
-            # if last_action_id in retrieval_ids:
-            #     valid.append(actions.ACTION_GRD_SLM)
-                
-            # LOGIC FIX: Only allow REWRITE if we just GRADED
-            # (Optional, but saves energy)
-            if last_action_id == actions.ACTION_GRD_SLM:
-                valid.append(actions.ACTION_RWT_SLM)
             
             # If we have decompose once active, don't allow further decomposition
             if not self.decompose_once:
-                valid.append(actions.ACTION_DEC_SLM)
                 valid.append(actions.ACTION_DEC_LLM)
+                valid.append(actions.ACTION_DEC_RSN)
 
             return valid
 
@@ -435,95 +428,101 @@ class WaterfallOracle(OracleInterface):
             actions.ACTION_GEN_LLM
         ],
 
-        # Strategy 3.1: Decompose with SLM, then generate with SLM
+        # Strategy 3.1: Decompose, then generate with SLM
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_GEN_SLM,),  # repeat until no active subquery
             actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
-        # Strategy 3.2: Decompose with SLM, then generate with LLM
+        # Strategy 3.2: Decompose, then generate with LLM
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_GEN_LLM,),  # repeat until no active subquery
             actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
 
-        # Strategy 4.1: Decompose with SLM, then retrieve with keyword and generate with SLM for each subproblem
+        # Strategy 4.1: Decompose, then retrieve with keyword and generate with SLM for each subproblem
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM),  # repeat until no active subquery
             actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
-        # Strategy 4.2: Decompose with SLM, then retrieve with keyword and generate with LLM for each subproblem
+        # Strategy 4.2: Decompose, then retrieve with keyword and generate with LLM for each subproblem
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_RET_KEY, actions.ACTION_GEN_LLM),  # repeat until no active subquery
             actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
 
-        # Strategy 4.3: Decompose with SLM, then retrieve with vector and generate with SLM for each subproblem
+        # Strategy 4.3: Decompose, then retrieve with vector and generate with SLM for each subproblem
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_RET_VEC, actions.ACTION_GEN_SLM),  # repeat until no active subquery
             actions.ACTION_GEN_SLM,     # final synthesis answer
         ],
 
-        # Strategy 4.4: Decompose with SLM, then retrieve with vector and generate with LLM for each subproblem
+        # Strategy 4.4: Decompose, then retrieve with vector and generate with LLM for each subproblem
         [
-            actions.ACTION_DEC_SLM,
+            actions.ACTION_DEC_LLM,
             (actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM),  # repeat until no active subquery
             actions.ACTION_GEN_LLM,     # final synthesis answer
         ],
-        # Strategy 5.1: Key search, Grade (SLM), Generate (SLM)
+        # Strategy 5.1: Reason, then key search, then generate (SLM)
         [
-            actions.ACTION_RET_KEY, 
-            actions.ACTION_GRD_SLM,
-            actions.ACTION_GEN_SLM
+            actions.ACTION_RSN_SLM,
+            actions.ACTION_RET_KEY,
+            actions.ACTION_GEN_SLM,
         ],
 
-        # Strategy 5.2: Vector search, Grade (LLM), Generate (LLM)
+        # Strategy 5.2: Reason, then vector search, then generate (LLM)
         [
-            actions.ACTION_RET_VEC, 
-            actions.ACTION_GRD_LLM,
-            actions.ACTION_GEN_LLM
+            actions.ACTION_RSN_LLM,
+            actions.ACTION_RET_VEC,
+            actions.ACTION_GEN_LLM,
         ],
-        # Strategy 6.1: Decompose, Retrieve, Grade (SLM), Answer (SLM) for each subtask
+        # Strategy 6.1: Decompose, retrieve, reason, answer for each subtask
         [
-            actions.ACTION_DEC_SLM,
-            (actions.ACTION_RET_KEY, actions.ACTION_GRD_SLM, actions.ACTION_GEN_SLM), 
-            actions.ACTION_GEN_SLM,     # Final synthesis
+            actions.ACTION_DEC_RSN,
+            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_SLM,
         ],
 
-        # Strategy 6.2: Decompose, Retrieve, Grade (LLM), Answer (LLM) for each subtask
+        # Strategy 6.2: Decompose, retrieve, reason, answer for each subtask
         [
-            actions.ACTION_DEC_SLM,
-            (actions.ACTION_RET_VEC, actions.ACTION_GRD_LLM, actions.ACTION_GEN_LLM), 
-            actions.ACTION_GEN_LLM,     # Final synthesis
+            actions.ACTION_DEC_RSN,
+            (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
+            actions.ACTION_GEN_LLM,
         ],
-        # Strategy 7.1: Decompose, then for each subtask: Rewrite -> Retrieve -> Grade -> Answer
+        # Strategy 7.1: Decompose, then for each subtask: retrieve -> reason -> answer
         [
-            actions.ACTION_DEC_SLM,
-            (actions.ACTION_RWT_SLM, actions.ACTION_RET_KEY, actions.ACTION_GRD_SLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_LLM,     # Final synthesis (using heavy model to tie it all together)
+            actions.ACTION_DEC_LLM,
+            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_LLM,
         ],
         
-        # Strategy 7.2: Same as 7.1 but using Vector search and LLM grading
+        # Strategy 7.2: Same as 7.1 but using vector search and LLM reasoning
         [
-            actions.ACTION_DEC_SLM,
-            (actions.ACTION_RWT_SLM, actions.ACTION_RET_VEC, actions.ACTION_GRD_LLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_LLM,     
+            actions.ACTION_DEC_LLM,
+            (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_LLM,
         ],
-        # Strategy 8.1: Search -> Grade -> Rewrite -> Search -> Grade -> Answer
+        # Strategy 8.1: Search -> Reason -> Search -> Reason -> Answer
         [
             actions.ACTION_RET_KEY,
-            actions.ACTION_GRD_SLM,
-            actions.ACTION_RWT_SLM,     # "Slate cleared"
+            actions.ACTION_RSN_SLM,
             actions.ACTION_RET_VEC,     # Try a different search method
-            actions.ACTION_GRD_SLM,
-            actions.ACTION_GEN_LLM
+            actions.ACTION_RSN_SLM,
+            actions.ACTION_GEN_LLM,
         ],
+        # Strategy 9.1: Form Long-Term Strategy, then Decompose, then execute
+        [
+            actions.ACTION_RSN_LLM,    # Populates [STRATEGY]
+            actions.ACTION_DEC_LLM,    # Decomposes based on the strategy
+            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
+            actions.ACTION_GEN_LLM,
+        ]
     ]
 
 

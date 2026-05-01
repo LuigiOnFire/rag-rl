@@ -6,8 +6,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
-#SBATCH --time=24:00:00            
-#SBATCH --output=logs/05_sweep_agent_%j.out 
+#SBATCH --time=48:00:00       
+#SBATCH --array=1-2
+#SBATCH --output=logs/05_sweep_agent_%A_%a.out 
 
 if [ -z "$1" ]; then
   echo "Error: You must provide a wandb sweep ID as the first argument."
@@ -37,8 +38,11 @@ apptainer exec --nv  \
             export OLLAMA_GPU_OVERHEAD=15032385536
             export OLLAMA_KEEP_ALIVE="5m"
             export PYTORCH_ALLOC_CONF="expandable_segments:True"
+
+            export OLLAMA_HOST="127.0.0.1:$((11434 + SLURM_ARRAY_TASK_ID))"
             
-            ./bin/ollama serve > logs/ollama_grpo_sweep.log 2>&1 &
+            ./bin/ollama serve > logs/ollama_grpo_sweep_${SLURM_ARRAY_TASK_ID}.log 2>&1 &  
+            
             OLLAMA_PID=$!
             
             sleep 15
@@ -46,6 +50,8 @@ apptainer exec --nv  \
             
             echo "Running Wandb Agent for Sweep: $SWEEP_ID"
             source .venv/bin/activate
+            export GRPO_RUN_ID="sweep_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+            export WANDB_NAME="$GRPO_RUN_ID"
             wandb agent $SWEEP_ID
             
             echo "Cleaning up..."

@@ -4,6 +4,7 @@ from typing import Optional, Tuple, Dict, Any
 from src.env import state
 import copy
 import json
+import hashlib
 from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
 from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever
@@ -18,6 +19,15 @@ except FileNotFoundError:
 
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
+
+def _hash_doc(doc: dict) -> str:
+    """Creates a deterministic hash using both title and text to avoid the chunking trap."""
+    title = doc.get("title", "")
+    text = doc.get("content", "")
+    
+    # Strip whitespace to prevent formatting artifacts from breaking the hash
+    clean_string = " ".join(f"{title} {text}".split())
+    return hashlib.md5(clean_string.encode('utf-8')).hexdigest()
 
 # A class to encapsulate the engine logic and manage the state
 class GreenEngine:
@@ -45,20 +55,18 @@ class GreenEngine:
         # Deep copy the state to avoid mutating the original
         new_state = copy.deepcopy(state)
 
-        # get_active_subquery is causing problems
-        # trying new method where we get the active subquery index instead of the object itself, then we can update the state directly without worrying about references
+        # Track the active subquery index so we can update the state directly
         active_idx = -1
         active_subquery = None
-        
-        # Iterate backwards to match your stack logic (LIFO/Reversed)
-        # using enumerate to keep track of the REAL index in the main list
+
+        # Iterate in natural order so execution matches the plan order
         subqueries = new_state.get('subqueries', [])
-        for i in range(len(subqueries) - 1, -1, -1):
-            if subqueries[i]['status'] in ["ACTIVE", "PENDING"]:
+        for i, sub in enumerate(subqueries):
+            if sub['status'] in ["ACTIVE", "PENDING"]:
                 active_idx = i
-                active_subquery = subqueries[i]
+                active_subquery = sub
                 # Side effect: Mark as ACTIVE immediately in the state
-                new_state['subqueries'][i]['status'] = "ACTIVE" 
+                new_state['subqueries'][i]['status'] = "ACTIVE"
                 break
 
         # Execute the action using the engine function
@@ -131,61 +139,47 @@ class GreenEngine:
             
             # Format & Update State
             formatted_docs = self._format_docs(raw_docs)
-            if active_subquery is not None:
-                active_subquery['documents'].extend(formatted_docs)
-            else:
-                new_state['documents'].extend(formatted_docs)
+
+            # 1. Determine which document list we are currently building
+            target_doc_list = active_subquery['documents'] if active_subquery is not None else new_state['documents']
             
-            obs = f"Found {len(formatted_docs)} docs."
+            # 2. Build a set of hashes we already have in that list
+            existing_hashes = {_hash_doc(doc) for doc in target_doc_list}
+            
+            # 3. Filter for unique documents
+            unique_docs = []
+            for doc in formatted_docs:
+                doc_hash = _hash_doc(doc)
+                if doc_hash not in existing_hashes:
+                    unique_docs.append(doc)
+                    existing_hashes.add(doc_hash)
 
-        # [4] or [5]: GRADING (GRD_SLM / GRD_LLM)
-        elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
-        # Grade the documents in the active subquery
-        # Not checked, may not work
-            count_rel = 0
-            target_docs = active_subquery['documents'] if active_subquery is not None else new_state.get('documents', [])
+            # 4. Update State with ONLY the unique docs
+            target_doc_list.extend(unique_docs)
+            
+            search_type = "Keyword Search" if action_id == actions.ACTION_RET_KEY else "Vector Search"
+            obs = f"[{search_type} executed for: '{argument}'] Found {len(formatted_docs)} docs. Added {len(unique_docs)} unique docs to context."
 
-            if not target_docs:
-                obs = "No documents to grade."
+        # --- [4] or [5]: REASON (RSN_SLM / RSN_LLM)
+        elif action_id in [actions.ACTION_RSN_SLM, actions.ACTION_RSN_LLM]:
+            # Generate either a short-term plan (SLM) or a long-term strategy (LLM)
+            use_llm = (action_id == actions.ACTION_RSN_LLM)
+            # Pass the updated state (with any active-subquery set) to the reasoning worker
+            plan_text = workers.generate_reasoning(new_state, use_llm)
+
+            # Overwrite strategy if we used LLM, otherwise set the short-term plan
+            if use_llm:
+                new_state['strategy'] = plan_text
+                obs = f"Generated strategy: {plan_text}"
             else:
-                logging.debug(f"Grading {len(target_docs)} documents for relevance.")
-                use_llm = (action_id == actions.ACTION_GRD_LLM)
-                
-                for doc in target_docs:
-                    grade = workers.generate_grade(new_state, doc["content"], use_llm=use_llm)
-                    doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
-                    if grade == "Relevant": count_rel += 1
+                new_state['plan'] = plan_text
+                obs = f"Generated plan: {plan_text}"
 
-                relevant_indices = []
-                for i, doc in enumerate(target_docs):
-                    if doc.get('relevance') == "RELEVANT":
-                        relevant_indices.append(f"Doc {i+1} ({doc['title']})")
-                        
-                if relevant_indices:
-                    obs = f"Graded docs. {count_rel} relevant: {', '.join(relevant_indices)}"
-                else:
-                    obs = "Graded docs. None found relevant."
 
-       # [6]: REWRITE (RWT_SLM)
-        elif action_id == actions.ACTION_RWT_SLM:           
-            if active_subquery is not None:
-                old_query = active_subquery.get("question", "")
-                
-                # Generate the new, specific question using past answers
-                new_query = workers.generate_rewrite(new_state)
-                
-                if new_query and new_query.lower() != old_query.lower():
-                    active_subquery["question"] = new_query
-                    obs = f"Rewrote pending sub-query to: '{new_query}'"
-                else:
-                    obs = "Rewrite deemed unnecessary or failed. Kept original query."
-            else:
-                obs = "Action failed. No active sub-query to rewrite."
-
-        # [7] or [8]: DECOMPOSITION (DEC_SLM / DEC_LLM)
-        elif action_id in [actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM]:
-            use_llm = (action_id == actions.ACTION_DEC_LLM)
-            plan_text = workers.generate_plan(state, use_llm=use_llm)
+        # [6] or [7]: DECOMPOSITION (DEC_LLM / DEC_RSN)
+        elif action_id in [actions.ACTION_DEC_LLM, actions.ACTION_DEC_RSN]:
+            reasoning_mode = (action_id == actions.ACTION_DEC_RSN)
+            plan_text = workers.generate_plan(state, reasoning_mode)
             
             # Format the plan into subqueries
             # Not sure how well this is going to work but we can iterate
@@ -193,11 +187,16 @@ class GreenEngine:
             # Previously this would recursively decompose the active subquery
             # I'm going to change the logic here
             # Now we always decompose the MAIN query, overwriting any existing subqueries
-            lines = plan_text.split('\n')
+            if "---SUBQUERIES---" in plan_text:
+                reasoning_text, subquery_text = plan_text.split("---SUBQUERIES---", 1)
+            else:
+                subquery_text = plan_text
+
+            lines = subquery_text.strip().split('\n')
             new_subs = []
 
             for i, line in enumerate(lines):
-                clean = line.strip().lstrip('1234567890. ')
+                clean = line.strip().lstrip('1234567890.-* ')
                 if clean:
                     new_subs.append({
                         "id": f"{i}",
@@ -207,11 +206,11 @@ class GreenEngine:
                         "documents": []
                     })
 
-            new_state['subqueries'] = list(reversed(new_subs))            
+            new_state['subqueries'] = new_subs
             task_preview = "\n".join([f"{i}. {sub['question']}" for i, sub in enumerate(new_subs)])
             obs = f"Decomposed into {len(new_subs)} sub-tasks:\n{task_preview}"
                 
-        # [9]: FAILURE
+        # [8]: FAILURE
         elif action_id == actions.ACTION_FAIL:
             obs = "Agent declared failure."
             new_state['status'] = "FAILED" # <--- Persist the failure
@@ -234,6 +233,55 @@ class GreenEngine:
 
         logging.debug(f"Before Step End: New State status: {new_state['status']}, action: {action_id}, observation: {obs}")
         return new_state
+
+    #     DEPRECATED
+
+    #     # [4] or [5]: GRADING (GRD_SLM / GRD_LLM)
+    #     elif action_id in [actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM]:
+    #     # Grade the documents in the active subquery
+    #     # Not checked, may not work
+    #         count_rel = 0
+    #         target_docs = active_subquery['documents'] if active_subquery is not None else new_state.get('documents', [])
+
+    #         if not target_docs:
+    #             obs = "No documents to grade."
+    #         else:
+    #             logging.debug(f"Grading {len(target_docs)} documents for relevance.")
+    #             use_llm = (action_id == actions.ACTION_GRD_LLM)
+                
+    #             for doc in target_docs:
+    #                 grade = workers.generate_grade(new_state, doc["content"], use_llm=use_llm)
+    #                 doc['relevance'] = "RELEVANT" if grade == "Relevant" else "IRRELEVANT"
+    #                 if grade == "Relevant": count_rel += 1
+
+    #             relevant_indices = []
+    #             for i, doc in enumerate(target_docs):
+    #                 if doc.get('relevance') == "RELEVANT":
+    #                     relevant_indices.append(f"Doc {i+1} ({doc['title']})")
+                        
+    #             if relevant_indices:
+    #                 obs = f"Graded docs. {count_rel} relevant: {', '.join(relevant_indices)}"
+    #             else:
+    #                 obs = "Graded docs. None found relevant."
+
+                    
+
+    #    # [6]: REWRITE (RWT_SLM)
+    #     elif action_id == actions.ACTION_RWT_SLM:           
+    #         if active_subquery is not None:
+    #             old_query = active_subquery.get("question", "")
+                
+    #             # Generate the new, specific question using past answers
+    #             new_query = workers.generate_rewrite(new_state)
+                
+    #             if new_query and new_query.lower() != old_query.lower():
+    #                 active_subquery["question"] = new_query
+    #                 obs = f"Rewrote pending sub-query to: '{new_query}'"
+    #             else:
+    #                 obs = "Rewrite deemed unnecessary or failed. Kept original query."
+    #         else:
+    #             obs = "Action failed. No active sub-query to rewrite."
+
     
     # Helper functions    
     def _format_docs(self, raw_docs: list) -> list:

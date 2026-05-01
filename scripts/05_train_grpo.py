@@ -34,6 +34,7 @@ import signal
 import logging
 import traceback
 import random
+import argparse
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
@@ -71,11 +72,11 @@ OUTPUT_DIR           = "models/green-rag-grpo-v1"
 # Rollout config
 NUM_GENERATIONS      = 4     # Trajectories per question (the "group" in GRPO)
 BATCH_SIZE           = 2     # Questions per outer training step
-MAX_STEPS_PER_TRAJ   = 8     # Max engine steps before forcing termination
+MAX_STEPS_PER_TRAJ   = 15     # Max engine steps before forcing termination
 MAX_NEW_TOKENS       = 4     # Tokens generated per LLM call inside the loop
 
 # Training config
-TOTAL_STEPS          = 300   # Training steps (each step = one batch of questions)
+TOTAL_STEPS          = 2000   # Training steps (each step = one batch of questions)
 LEARNING_RATE        = 6.5e-6
 GRADIENT_ACCUM       = 1
 KL_COEF              = 0.015  # β — KL penalty coefficient (keeps policy close to ref)
@@ -84,36 +85,25 @@ CLIP_EPS             = 0.2    # ε — PPO-style clipping (applied inside GRPO l
 # Reward config
 FORMAT_CONSOLATION_REWARD = 0.0   # Reward for valid format but wrong answer
 JOULE_PENALTY_SCALE       = 0.04  # Multiply total_joules by this to get the penalty
-MAX_JOULE_PENALTY         = 0.20   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
+MAX_JOULE_PENALTY         = 0   # The penalty is CAPPED at this value, set at 0 for now, to be revisited
 
 # Dataset config
 MAX_QUESTIONS = None   # Cap on how many examples to draw from the dataset (None = unlimited)
 OVERFIT_MODE  = False  # Set to True to train repeatedly on two specific questions
-ONLY_EASY_MODE = True  # Set to True to train only on 'level == easy' questions from HotpotQA
+ONLY_EASY_MODE = False  # Set to True to train only on 'level == easy' questions from HotpotQA
 
 # Checkpoint / logging
 SAVE_EVERY    = 25   # Save every N steps — keep low to minimise work lost on crash
-EVAL_EVERY    = 25   # Evaluate on a validation set every N steps
-EVAL_SAMPLES  = 5    # How many questions to evaluate during the eval phase   # Save every N steps — keep low to minimise work lost on crash
-run_id        = time.strftime("%Y%m%d_%H%M%S")
-LOG_FILE      = f"data/ppo_training/grpo_run_{run_id}.log"
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+EVAL_EVERY    = 50   # Evaluate on a validation set every N steps
+EVAL_SAMPLES  = 40   # How many questions to evaluate during the eval phase   # Save every N steps — keep low to minimise work lost on crash
+LOG_FILE      = None
 
 # Dashboard logging (Weights & Biases)
 USE_WANDB      = True          # Set False to disable; falls back to log-only
 WANDB_PROJECT  = "greenrag-grpo"
-WANDB_RUN_NAME = f"grpo_{run_id}"  # forward-ref to run_id defined below
+WANDB_RUN_NAME = None
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
-)
 logger = logging.getLogger(__name__)
 
 # Silence noisy HTTP logs from Ollama / Requests
@@ -123,6 +113,19 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
+
+
+def _setup_logging(log_file: str) -> None:
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[
+            logging.FileHandler(log_file, mode="w"),
+            logging.StreamHandler(sys.stdout),
+        ],
+        force=True,
+    )
 
 # ── Crash capture ────────────────────────────────────────────────────────────
 # Route any unhandled Python exception into the log file (not just stderr).
@@ -164,30 +167,66 @@ def compute_reward(
     """
     Returns (scalar_reward, is_correct).
 
-    Correct answer:    1.0  - min(max_joule_penalty, total_joules * joule_penalty_scale)
-    Valid format only: FORMAT_CONSOLATION_REWARD  (+0.1)
+    Correct answer:    1.0 + process_reward
+    Wrong answer:      process_reward (if it ended with a GEN action)
     Broken format:     0.0
     """
     if final_state is None or not format_valid:
-        return FORMAT_CONSOLATION_REWARD, False
+        return 0.0, False
+
+    history = final_state.get("history", [])
+
+    # 1. Calculate Process Reward FIRST (So we can save it from the reaper)
+    process_reward = 0.0
+    reasoning_count = 0
+    decomposition_count = 0
+
+    for i, step in enumerate(history):
+        act_id = step.get("action_id")
+
+        if act_id in _REASON_IDS:
+            # Gap Analysis Bonus (Exclusive to Step 0)
+            if i == 0:
+                process_reward += 0.2
+            else:
+                # ICROT Decay (Starts at 0.1, halves each time)
+                process_reward += 0.1 * (0.5 ** reasoning_count)
+                reasoning_count += 1
+
+        # We do not want to reward two decomposes right off the bat, just one
+        if act_id in _DECOMPOSE_IDS and i <= 1 and decomposition_count == 0:
+            process_reward += 0.30
+            decomposition_count += 1
+
+    # Calculate Joules (Will be 0.0 during Phase 1 Capability Training)
+    total_joules = float(final_state.get("total_joules", 0.0))
+    joule_penalty = min(max_joule_penalty, total_joules * joule_penalty_scale)
+
+    # 3. ExPERIMENTAL Crash Forgiveness Check
+    # If it failed syntax, or hit MAX_STEPS without a final GEN action...
+    if not format_valid or not history or history[-1].get("action_id") not in _GENERATE_IDS:
+        if decomposition_count > 0:
+            # It braved the hard path and died. Let it keep the Danger Pay!
+            reward = process_reward - joule_penalty
+            logger.info(f"  [Reward] CRASH FORGIVEN | process={process_reward:.3f} reward={reward:.3f}")
+            return reward, False
+        else:
+            # It took the easy path and died. Punish it.
+            return 0.0, False
 
     final_answer = final_state.get("answer") or ""
-
-    if not final_answer:
-        # No answer produced despite valid format → consolation
-        return FORMAT_CONSOLATION_REWARD, False
-
     is_correct, reason = _judge.judge(final_answer, ground_truth, question)
 
     if is_correct:
-        total_joules = float(final_state.get("total_joules", 0.0))
-        joule_penalty = min(max_joule_penalty, total_joules * joule_penalty_scale)
-        reward = 1.0 - joule_penalty
-        logger.info(f"  [Reward] CORRECT | joules={total_joules:.3f} penalty={joule_penalty:.3f} reward={reward:.3f}")
+        # All correct answers are to be treated equally.
+        # The incorrect ones we guide to victory gradually.
+        reward = 1.0 + process_reward - joule_penalty
+        logger.info(f"  [Reward] CORRECT | process={process_reward:.3f} reward={reward:.3f}")
         return reward, True
-    else:
-        logger.info(f"  [Reward] WRONG ({reason}) | answer='{final_answer[:60]}'")
-        return FORMAT_CONSOLATION_REWARD, False  # right format, wrong answer
+
+    reward = process_reward - joule_penalty    
+    logger.info(f"  [Reward] WRONG ({reason}) | process={process_reward:.3f} answer='{final_answer[:60]}'")
+    return reward, False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -196,8 +235,8 @@ def compute_reward(
 
 def _parse_action(text: str) -> Tuple[int, str]:
     """
-    Parse 'Action: <id>\\nInput: <argument>' from raw LLM output.
-    Returns (action_id, argument). action_id == -1 signals parse failure.
+    Parse 'Action: <id> from raw LLM output.
+    Returns action_id. action_id == -1 signals parse failure.
 
     The action ID must appear as the FIRST token in the generated text
     (possibly preceded by a space/colon), matching what the prompt ends with:
@@ -207,9 +246,7 @@ def _parse_action(text: str) -> Tuple[int, str]:
     act_match = re.match(r"[\s:]*(\d)", text)
     action_id = int(act_match.group(1)) if act_match else -1
 
-    arg_match = re.search(r"Input:\s*(.*)", text, re.DOTALL)
-    argument = arg_match.group(1).strip() if arg_match else ""
-    return action_id, argument
+    return action_id
 
 
 def rollout_one_trajectory(
@@ -304,13 +341,13 @@ def rollout_one_trajectory(
         logger.info(f"\n[MODEL SAID]\n{generated_text}")
 
         # ── PARSE ACTION ───────────────────────────────────────────────
-        action_id, argument = _parse_action(generated_text)
+        action_id = _parse_action(generated_text)
 
         action_name = getattr(actions, 'get_action_name', lambda x: f"ACTION_{x}")(action_id)
         if action_id < 0 or action_id not in actions.ALL_ACTION_IDS:
             action_name = "INVALID_ACTION"
 
-        logger.info(f"\n[ACTION TAKEN]\n{action_name} ({argument})")
+        logger.info(f"\n[ACTION TAKEN]\n{action_name}")
 
         # ── APPEND TO TRAJECTORY STATES ──────────────────────────────────
         # Save a clean snapshot of exactly what prompted the model -> what it said
@@ -331,7 +368,7 @@ def rollout_one_trajectory(
 
         # ── ENGINE STEP ─────────────────────────────────────────────────────
         try:
-            new_state = engine.step(state, action_id, argument=argument or None)
+            new_state = engine.step(state, action_id)
             format_valid = True
         except Exception as exc:
             logger.warning(f"\n[OBSERVATION]\nENGINE ERROR: {exc}\n")
@@ -359,12 +396,17 @@ def rollout_one_trajectory(
 
 
 # Action-ID groupings for dashboard metrics
-_SEARCH_IDS = {actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM}
+_GENERATE_IDS   = {actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM}
 _KEYWORD_IDS    = {actions.ACTION_RET_KEY}
 _DENSE_IDS      = {actions.ACTION_RET_VEC}
-_DECOMPOSE_IDS  = {actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM}
-_VERIFY_IDS     = {actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM}
-_REWRITE_IDS     = {actions.ACTION_RWT_SLM}
+_DECOMPOSE_IDS  = {actions.ACTION_DEC_LLM, actions.ACTION_DEC_RSN}
+_REASON_IDS     = {actions.ACTION_RSN_SLM, actions.ACTION_RSN_LLM}
+
+
+# DEPRECATED
+# _DECOMPOSE_IDS  = {actions.ACTION_DEC_SLM, actions.ACTION_DEC_LLM}
+# _VERIFY_IDS     = {actions.ACTION_GRD_SLM, actions.ACTION_GRD_LLM}
+# _REWRITE_IDS     = {actions.ACTION_RWT_SLM}
 
 
 
@@ -401,7 +443,8 @@ def rollout_batch(
 
     # Action-use counters across the whole group
     action_totals: Dict[str, int] = {
-        "search": 0, "keyword": 0, "dense": 0, "decompose": 0, "verify": 0, "rewrite": 0, "other": 0
+        "generate": 0, "keyword": 0, "dense": 0, "decompose": 0, "reason": 0, "other": 0
+        #  "verify": 0, "rewrite": 0,
     }
 
     for gen_idx in range(num_generations):
@@ -431,18 +474,22 @@ def rollout_batch(
         for item in history:
             aid = item.get("action_id", -1)
             traj_actions.append(getattr(actions, 'get_action_name', lambda x: f"ACTION_{x}")(aid))
-            if aid in _SEARCH_IDS:
-                action_totals["search"] += 1
+            if aid in _GENERATE_IDS:
+                action_totals["generate"] += 1
             elif aid in _KEYWORD_IDS:
                 action_totals["keyword"] += 1
             elif aid in _DENSE_IDS:
                 action_totals["dense"] += 1
             elif aid in _DECOMPOSE_IDS:
                 action_totals["decompose"] += 1
-            elif aid in _VERIFY_IDS:
-                action_totals["verify"] += 1
-            elif aid in _REWRITE_IDS:
-                action_totals["rewrite"] += 1
+            elif aid in _REASON_IDS:
+                action_totals["reason"] += 1
+
+            # DEPRECATED    
+            # elif aid in _VERIFY_IDS:
+            #     action_totals["verify"] += 1
+            # elif aid in _REWRITE_IDS:
+            #     action_totals["rewrite"] += 1
             else:
                 action_totals["other"] += 1
 
@@ -465,12 +512,13 @@ def rollout_batch(
         "accuracy/mean":        sum(correct_flags) / len(correct_flags),
         "cost/mean_joules":     sum(joules_list) / len(joules_list),
         "metrics/mean_steps":   sum(steps_list) / len(steps_list) if steps_list else 0,
-        "tool_pct/search":      action_totals["search"] / total_actions,
+        "tool_pct/generate":    action_totals["generate"] / total_actions,
         "tool_pct/keyword":     action_totals["keyword"]    / total_actions,
         "tool_pct/dense":       action_totals["dense"]      / total_actions,
         "tool_pct/decompose":   action_totals["decompose"]  / total_actions,
-        "tool_pct/verify":      action_totals["verify"]     / total_actions,
-        "tool_pct/rewrite":     action_totals["rewrite"]    / total_actions,
+        "tool_pct/reason":      action_totals["reason"]     / total_actions,
+        # tool_pct/verify":      action_totals["verify"]     / total_actions,
+        # "tool_pct/rewrite":     action_totals["rewrite"]    / total_actions,
     }
 
     return trajectories, rewards, final_states, metrics
@@ -820,6 +868,16 @@ def find_latest_checkpoint(output_dir: str) -> Tuple[Optional[str], int]:
     return best_path, best_step
 
 
+def _parse_step_from_dir(path: str) -> int:
+    base = os.path.basename(path.rstrip("/"))
+    if base.startswith("step_"):
+        try:
+            return int(base.split("_", 1)[1])
+        except ValueError:
+            return 0
+    return 0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN TRAINING LOOP
 # ──────────────────────────────────────────────────────────────────────────────
@@ -831,9 +889,57 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 def main():
+    parser = argparse.ArgumentParser(description="GreenRAG GRPO Training")
+    parser.add_argument("--run-id", type=str, default=None, help="Run identifier for logging and checkpoints")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory for checkpoints")
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a run directory or a specific step_N checkpoint to resume from",
+    )
+    parser.add_argument("--learning_rate", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--kl_coef", type=float, default=None, help="Override KL coefficient")
+    parser.add_argument("--clip_eps", type=float, default=None, help="Override PPO clip epsilon")
+    parser.add_argument("--adam_beta1", type=float, default=None, help="Override Adam beta1")
+    args = parser.parse_args()
+
+    run_id = args.run_id or time.strftime("%Y%m%d_%H%M%S")
+    output_dir = args.output_dir
+
+    ckpt_path = None
+    start_step = 0
+
+    if args.resume_checkpoint:
+        resume_path = args.resume_checkpoint
+        if os.path.isdir(resume_path) and os.path.basename(resume_path).startswith("step_"):
+            ckpt_path = resume_path
+            start_step = _parse_step_from_dir(resume_path)
+            if output_dir is None:
+                output_dir = os.path.dirname(resume_path)
+        elif os.path.isdir(resume_path):
+            ckpt_path, start_step = find_latest_checkpoint(resume_path)
+            if ckpt_path is None:
+                raise RuntimeError(f"No step_* checkpoint found under {resume_path}")
+            if output_dir is None:
+                output_dir = resume_path
+        else:
+            raise RuntimeError(f"Resume path not found: {resume_path}")
+
+    if output_dir is None:
+        output_dir = os.path.join(OUTPUT_DIR, f"run_{run_id}")
+
+    global LOG_FILE, WANDB_RUN_NAME
+    LOG_FILE = f"data/grpo_training/grpo_run_{run_id}.log"
+    WANDB_RUN_NAME = f"grpo_{run_id}"
+    _setup_logging(LOG_FILE)
+
     set_seed(42)
     logger.info("=== GreenRAG GRPO Training ===")
     logger.info(f"Run ID: {run_id}")
+    logger.info(f"Output dir: {output_dir}")
+    if ckpt_path:
+        logger.info(f"Resuming from: {ckpt_path} (step {start_step})")
 
     # ── 0. Dashboard init ────────────────────────────────────────────────────
     if USE_WANDB:
@@ -853,16 +959,24 @@ def main():
         joule_scale = JOULE_PENALTY_SCALE
         max_joule   = MAX_JOULE_PENALTY
 
+    # CLI overrides (used by sweeps that pass args directly)
+    if args.learning_rate is not None:
+        lr = args.learning_rate
+    if args.kl_coef is not None:
+        kl = args.kl_coef
+    if args.clip_eps is not None:
+        eps = args.clip_eps
+    if args.adam_beta1 is not None:
+        beta1 = args.adam_beta1
+
     # ── 1. Detect checkpoint ─────────────────────────────────────────────────
-    ckpt_path, start_step = find_latest_checkpoint(OUTPUT_DIR)
     if ckpt_path:
-        logger.info(f"Resuming from checkpoint: {ckpt_path}  (step {start_step})")
         # PEFT saves each named adapter in its own subdirectory when multiple
         # adapters are present, so adapter_config.json lives at
         # <ckpt>/active_rl/adapter_config.json — not at <ckpt>/ directly.
         active_rl_source = os.path.join(ckpt_path, "active_rl")
     else:
-        logger.info("No checkpoint found — starting from SFT weights.")
+        logger.info("No checkpoint provided — starting from SFT weights.")
         active_rl_source = SFT_MODEL_PATH
 
     # ── 2. Load Model ────────────────────────────────────────────────────────
@@ -977,13 +1091,13 @@ def main():
         
     if ONLY_EASY_MODE and not OVERFIT_MODE:
         logger.info("ONLY_EASY_MODE is ENABLED. Training only on the first 100 'easy' difficulty HotpotQA questions.")
+        global MAX_QUESTIONS, TOTAL_STEPS
         active_datasets = ["hotpot"]
         dataset_weights = [1.0]
         dataset_configs["hotpot"]["level"] = "easy"
         MAX_QUESTIONS = 100
         
         # Override steps for exactly 3 epochs across the 100 questions
-        global TOTAL_STEPS
         TOTAL_STEPS = (MAX_QUESTIONS // BATCH_SIZE) * 3
         logger.info(f"  => Adjusted TOTAL_STEPS to {TOTAL_STEPS} for exactly 3 epochs!")
 
@@ -1090,11 +1204,11 @@ def main():
                 f"  Rewards: {[f'{r:.3f}' for r in rewards]}  mean={mean_r:.3f}  "
                 f"accuracy={single_q_metrics['accuracy/mean']:.2f}  "
                 f"joules={single_q_metrics['cost/mean_joules']:.3f}  "
-                f"tool% search={single_q_metrics['tool_pct/search']:.2f} "
+                f"tool% generate={single_q_metrics['tool_pct/generate']:.2f} "
                 f"kw={single_q_metrics['tool_pct/keyword']:.2f} "
                 f"dense={single_q_metrics['tool_pct/dense']:.2f} "
-                f"verify={single_q_metrics['tool_pct/verify']:.2f} "
-                f"rewrite={single_q_metrics['tool_pct/rewrite']:.2f}"
+                # f"verify={single_q_metrics['tool_pct/verify']:.2f} "
+                # f"rewrite={single_q_metrics['tool_pct/rewrite']:.2f}"
             )
 
             # Check if clamp fired for THIS question
@@ -1166,7 +1280,7 @@ def main():
 
         # ── Checkpoint ───────────────────────────────────────────────────────
         if (step + 1) % SAVE_EVERY == 0:
-            ckpt_dir = os.path.join(OUTPUT_DIR, f"step_{step+1}")
+            ckpt_dir = os.path.join(output_dir, f"step_{step+1}")
             os.makedirs(ckpt_dir, exist_ok=True)
             model.save_pretrained(ckpt_dir, selected_adapters=["active_rl"])
             tokenizer.save_pretrained(ckpt_dir)
@@ -1208,10 +1322,10 @@ def main():
 
 
     # ── Final Save ───────────────────────────────────────────────────────────
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    model.save_pretrained(OUTPUT_DIR, selected_adapters=["active_rl"])
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    logger.info(f"\nTraining complete. Model saved to {OUTPUT_DIR}")
+    os.makedirs(output_dir, exist_ok=True)
+    model.save_pretrained(output_dir, selected_adapters=["active_rl"])
+    tokenizer.save_pretrained(output_dir)
+    logger.info(f"\nTraining complete. Model saved to {output_dir}")
 
     if USE_WANDB:
         wandb.run.summary["metrics/steps_to_converge"] = steps_to_converge # ADD THISs

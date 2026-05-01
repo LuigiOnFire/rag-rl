@@ -1,6 +1,7 @@
 import torch
 import logging
 import copy
+import random
 from typing import Any, Dict, List, Union
 import glob
 import json
@@ -22,6 +23,7 @@ from trl.trainer.sft_config import SFTConfig
 
 sys.path.append(os.getcwd())
 from src.train.dataset import load_and_clean_dataset
+from src.agent import actions
 from src.agent.prompts import format_state_for_prompt
 
 # Setup logging
@@ -34,6 +36,15 @@ if BASE_MODEL == "qwen2.5:3b":
     BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 RUN_LOGS_DIR = "data/trajectories"
 OUTPUT_DIR = "models/green-rag-sft-v1"
+# Prefer to overweight multi-hop, high-cost actions for stronger routing priors.
+COMPLEX_ACTION_IDS = {
+    actions.ACTION_DEC_LLM,
+    actions.ACTION_DEC_RSN,
+    actions.ACTION_RSN_LLM,
+
+}
+COMPLEX_ACTION_MULTIPLIER = 4.0
+DATASET_SEED = 42
 # --- 1. CLEANING & LOADING LOGIC ---
 # src/train/dataset.py
 
@@ -106,7 +117,12 @@ def main():
 
     # 3. Create Dataset
     # Returns a Hugging Face 'datasets.Dataset'
-    dataset = load_and_clean_dataset(jsonl_files, tokenizer)
+    oversample_config = {
+        "complex_action_ids": COMPLEX_ACTION_IDS,
+        "complex_multiplier": COMPLEX_ACTION_MULTIPLIER,
+    }
+    rng = random.Random(DATASET_SEED)
+    dataset = load_and_clean_dataset(jsonl_files, tokenizer, oversample_config, rng)
     if len(dataset) == 0:
         print("Dataset is empty. Exiting.")
         return
@@ -158,7 +174,7 @@ def main():
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
         logging_steps=10,
-        num_train_epochs=4,        # 10 Epochs is safe with masking
+        num_train_epochs=12,        # 12 this is probably excessive but yolo
         max_grad_norm=0.3,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",

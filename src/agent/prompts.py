@@ -9,7 +9,8 @@ def format_state_for_prompt(state):
    # Uses .get('question') which matches your JSON's "question" key
    prompt = f"Goal: {state.get('question', 'Unknown')}\n"
    prompt += f"Status: {state.get('status', 'SOLVING')}\n"
-   prompt += f"Scratchpad: {state.get('scratchpad', '')}\n\n"
+   prompt += f"Strategy (Long-term path to answer the Goal): {state.get('strategy', 'None')}\n"
+   prompt += f"Plan (Short-term immediate next steps): {state.get('plan', 'None')}\n\n"
    
    # 2. History
    history = state.get('history', [])
@@ -36,51 +37,48 @@ def format_state_for_prompt(state):
          prompt += f"[{i+1}] {title}: {content}\n"
       prompt += "\n"
    
-   # 3. Sub-Tasks (Stack)
+   # 3. Sub-Tasks (Plan Order)
    subqueries = state.get('subqueries', [])
-   prompt += "Sub-Tasks:\n"
+   prompt += "Sub-Tasks (in order):\n"
    if not subqueries:
       prompt += "(None)\n"
    else:
-      for i, sub in enumerate(reversed(subqueries)):
-            status_tag = "[ACTIVE]" if i == 0 else "[PENDING]"
+      for sub in subqueries:
+            status_tag = f"[{sub.get('status', 'PENDING')}]"
             prompt += f"{status_tag} {sub['question']}\n"
 
    prompt += "\n"
    
    prompt += """
 AVAILABLE ACTIONS:
-Type only the corresponding action ID (0-9).
+Type only the corresponding action ID (0-8).
 ------------------
 [0] GEN_SLM (Answer Question with Small LLM)
-   - Usage: You have sufficient information to answer the Main Goal.
+   - Usage: Answer the main query or the current active subquery cost-efficiently with a smaller language model.
 
 [1] GEN_LLM (Answer Question with Large LLM)
-   - Usage: You have sufficient information to answer the Main Goal.
+   - Usage: Answer the main query or the current active subquery with the large language model.
 
 [2] RET_KEY (Keyword Search)
-   - Usage: Find specific facts, names, or dates.
+   - Usage: Prompt an SLM to generate a search term to find specific facts, names, or dates.
 
 [3] RET_VEC (Dense/Concept Search)
-   - Usage: Find explanations or broader concepts.
+   - Usage: Prompt an LLM to generate a search term to find explanations or broader concepts.
 
-[4] GRD_SLM (Grade/Verify with Small LLM)
-   - Usage: Use this to quick-check if retrieved documents are actually relevant to the query.
+[4] RSN_SLM (Reasoning Pass with Small LLM)
+   - Usage: Think briefly about what is missing and choose the next action.
 
-[5] GRD_LLM (Grade/Verify with Large LLM)
-   - Usage: Use this for a deep consistency check. Verifies if a generated answer is hallucinated or unsupported by context.
+[5] RSN_LLM (Reasoning Pass with Large LLM)
+   - Usage: Think more deeply to determine the best next action or strategy.
 
-[6] RWT_SLM (Rewrite Query)
-   - Usage: The current query is ambiguous, too conversational, or failed to yield results.
+[6] DECOMPOSE_LLM (Decompose into Sub-Tasks)
+   - Usage: Break down a multi-hop query into a list of simpler questions.
 
-[7] DEC_SLM (Decompose into Sub-Tasks)
-- Usage: Call upon an SLM to break down a complex goal into simpler sub-tasks.
+[7] DECOMPOSE_W_REASONING (Decompose with Reasoning)
+   - Usage: Perform a deep reasoning trace, then decompose into sub-questions.
 
-[8] DEC_LLM (Decompose into Sub-Tasks with Large LLM)
-- Usage: Call upon an LLM to break down a complex goal into simpler sub-tasks.
-
-[9] FAIL (Abort)
-- Usage: Use this to abort the current task if it is unsolvable.
+[8] FAIL (Abort)
+   - Usage: Use this to abort the current task if it is unsolvable.
 ------------------
 """
    

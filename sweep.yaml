@@ -1,7 +1,8 @@
 program: scripts/05_train_grpo.py
+project: thrifty-rag-sweeps
 method: bayes
 metric:
-  name: accuracy/cumulative
+  name: eval/accuracy
   goal: maximize
 parameters:
   # Don't touch these
@@ -9,24 +10,25 @@ parameters:
     value: 0.2
   adam_beta1:
     value: 0.9
+  # joule_penalty_scale:
+  #   distribution: uniform
+  #   min: 0.0
+  #   max: 0.06
+  # max_joule_penalty:
+  #   distribution: uniform
+  #   min: 0.0
+  #   max: 0.3
+
   # Tune these
   learning_rate:
     distribution: log_uniform_values
-    min: 5e-6
-    max: 5e-5
+    min: 5e-7
+    max: 1e-5
   kl_coef:
     distribution: uniform
     min: 0.008
     max: 0.02
   
-  joule_penalty_scale:
-    distribution: uniform
-    min: 0.0
-    max: 0.06
-  max_joule_penalty:
-    distribution: uniform
-    min: 0.0
-    max: 0.3
 command:
   - ${env}
   - .venv/bin/python

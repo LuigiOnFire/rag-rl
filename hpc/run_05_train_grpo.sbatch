@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
-#SBATCH --time=24:00:00            # GRPO needs time, keeping your 24hr limit!
+#SBATCH --time=48:00:00            
 #SBATCH --output=logs/05_train_grpo_%j.out 
 
 # 1. Load the secure .env file (Goodbye hardcoded HF_TOKEN!)

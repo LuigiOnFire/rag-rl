@@ -31,7 +31,8 @@ class GreenState(TypedDict):
     prev_searches: List[str]  # The raw search queries made, for reference and potential reuse in subqueries
 
     # 2. The Brain (Reasoning Traces)
-    scratchpad: str  # e.g., "I need to check X because Y failed..."
+    strategy: str # a longer term strategy to persist between actions, but can be overwritten
+    plan: str # a shorter term plan that is replaced after one action
 
     # 3. The Plan
     subqueries: List[SubQuery]
@@ -50,7 +51,8 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
         "question": question,
         "status": "SOLVING",
         "total_joules": 0.0,
-        "scratchpad": "Goal: Answer the main query.",
+        "strategy": "No strategy formed yet. Consider using a Reasoning Pass.",
+        "plan": "No immediate plan formed yet.",
         "subqueries": [],
         "history": [],
         "documents": [],
@@ -60,9 +62,9 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
     }
 
 def get_active_subquery(state: GreenState):
-    # Find last active or pending
+    # Find first active or pending in natural order
     # NO LONGER sets state as active
-    for sub in reversed(state['subqueries']):
+    for sub in state['subqueries']:
         if sub['status'] in ["ACTIVE", "PENDING"]:
             return sub
     

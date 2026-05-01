@@ -56,6 +56,19 @@ class LLMWorker:
 slm_worker = LLMWorker(SLM_NAME)
 llm_worker = LLMWorker(LLM_NAME)
 
+
+def _brain_context(state: GreenState, task_focus: str) -> str:
+    """Render the agent's current strategy and plan with task-specific guidance."""
+    strategy = state.get('strategy', 'None')
+    plan = state.get('plan', 'None')
+    return (
+        f"Task Focus: {task_focus}\n"
+        "Strategy = long-term path to solve the Goal (what information to find, in what order).\n"
+        "Plan = immediate next steps for this task (what to do right now).\n"
+        f"Current Strategy: {strategy}\n"
+        f"Current Plan: {plan}\n"
+    )
+
 # --- LOGGING UTILITY ---
 def configure_worker_logging(log_path: str):
     """
@@ -157,6 +170,7 @@ Question: "Who won the 1996 World Series?"
 Good Answer: "New York Yankees"
 
 ### CURRENT TASK
+{_brain_context(state, "Answer synthesis")}
 Context:
 {context_str}
 
@@ -213,6 +227,8 @@ Task: Create a query for a keyword search to find information relevant to the Qu
 Do NOT write SQL. Do NOT write code.
 Question: "{active_query}"
 
+{_brain_context(state, "Keyword search query")}
+
 {known_info_str}
 {prev_searches_str}
 Constraint: {constraint_text}
@@ -266,6 +282,8 @@ Task: Create a query for a vector search to find information relevant to the Que
 Do NOT write SQL. Do NOT write code. Do NOT use markdown formatting.
 Question: "{active_query}"
 
+{_brain_context(state, "Vector search query")}
+
 {known_info_str}
 {prev_searches_str}
 Constraint: {constraint_text}
@@ -290,6 +308,8 @@ def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> s
     prompt = f"""
 Task: Check if the Document contains information relevant to the Question.
 Question: "{active_query}"
+
+{_brain_context(state, "Document relevance check")}
 
 Document:
 "{doc_text[:2000]}" ... (truncated)
@@ -330,6 +350,8 @@ def generate_rewrite(state: GreenState) -> str:
     Resolved Queries:
     {context_str}
 
+    {_brain_context(state, "Rewrite subquery")}
+
     Target Query to Rewrite: "{active_sub['question']}"
     
     Constraint: Output ONLY the rewritten query. Do not answer it. If no rewrite is needed, output the original Target Query.
@@ -338,14 +360,91 @@ def generate_rewrite(state: GreenState) -> str:
         
         return slm_worker.generate(prompt).strip()
 
-def generate_plan(state: GreenState, use_llm: bool = False) -> str:
+def generate_reasoning(state: GreenState, use_llm: bool = False) -> str:
     """
-    Action 7/8 (Optional Support): Generates a step-by-step plan if the Director
-    delegates the planning process entirely.
+    Action 4/5: Generates a short-term plan (SLM) or long-term strategy (LLM).
     """
     worker = llm_worker if use_llm else slm_worker
     
     question = state['question']
+    
+    # 1. Gather Context (Documents)
+    context_str = ""
+    found_docs = False
+    for doc in state.get('documents', []):
+        if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
+            context_str += f"- {doc['content']}\n"
+            found_docs = True
+
+    for sub in state.get('subqueries', []):
+        for doc in sub.get('documents', []):
+            if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
+                context_str += f"- {doc['content']}\n"
+                found_docs = True
+                
+    if not found_docs:
+        context_str = "No external documents found yet."
+
+    # 2. Gather Recent History (Crucial for Reasoning)
+    # Get the last 3 actions so the model knows what just succeeded/failed
+    history_str = ""
+    recent_history = state.get("history", [])[-3:] 
+    for entry in recent_history:
+        history_str += f"- Action: {entry.get('action_name')} | Result: {entry.get('observation')}\n"
+        
+    if not history_str:
+        history_str = "No previous actions taken."
+
+    # 3. Identify Active Sub-task (if any)
+    active_sub = None
+    for sub in state.get('subqueries', []):
+        if sub.get('status') == 'ACTIVE':
+            active_sub = sub['question']
+            break
+    
+    task_focus = f"\nCurrently Active Sub-Task: {active_sub}" if active_sub else ""
+
+    # 4. Build the Dynamic Prompt
+    base_prompt = (
+        f"Main Question: {question}{task_focus}\n\n"
+        f"{_brain_context(state, 'Reasoning pass')}\n"
+        f"Recent History (Last 3 actions):\n{history_str}\n"
+        f"Current Knowledge Context:\n{context_str}\n"
+    )
+
+    if use_llm:
+        # RSN_LLM: Long-term Strategy
+        instruction = (
+            "You are a strategic planning AI. Your job is to set the long-term strategy. "
+            "Analyze the Main Question, the Current Knowledge, and the Recent History. "
+            "Write a concise, high-level strategy (2-4 sentences) outlining the exact sequence of "
+            "information we still need to find, and how we should approach it. "
+            "Do not output a numbered list. Return ONLY the strategy text."
+        )
+    else:
+        # RSN_SLM: Short-term Plan
+        instruction = (
+            "You are a tactical AI assistant. Your job is to determine the immediate next step. "
+            "Look at the Recent History and Current Knowledge. Write exactly 1 or 2 sentences stating "
+            "what our VERY NEXT action should be (e.g., 'We need to run a Keyword Search for X' or "
+            "'We have the answer, generate the final response'). "
+            "Return ONLY the plan text."
+        )
+
+    full_prompt = f"{base_prompt}\n\n{instruction}"
+    
+    # 5. Call the worker
+    reasoning_text = worker.generate(full_prompt).strip()
+    
+    return reasoning_text
+def generate_plan(state: GreenState, reasoning_mode = False) -> str:
+    """
+    Action 6/7 (Optional Support): Generates a step-by-step plan if the Director
+    delegates the planning process entirely.
+    """   
+    question = state['question']
+    worker = llm_worker
+
     
     # 1. Gather Context
     context_str = ""
@@ -369,26 +468,33 @@ def generate_plan(state: GreenState, use_llm: bool = False) -> str:
     if not found_docs:
         context_str = "No external documents found. Rely on internal knowledge."
     
-    prompt = f"""You are an expert AI search planner.
-Task: Break down the Main Question into 2-4 simple, independent search queries based on the provided Context.
-Constraint: Return ONLY a valid numbered list. No intro, no filler.
+    # 2. Build the Dynamic Prompt
+    base_prompt = (
+        "You are an expert AI search planner.\n"
+        f"Main Question: {question}\n"
+        f"{_brain_context(state, 'Decomposition planning')}\n"
+        f"Context:\n{context_str}\n\n"
+        "Task: Break down the Main Question into 2-4 simple, independent search queries."
+    )
 
-Context:
-{context_str}
+    if reasoning_mode:
+        # DEC_RSN: Force the reasoning trace and the explicit separator
+        instruction = (
+            "INSTRUCTIONS:\n"
+            "1. First, analyze the dependencies of the query and context. Write a brief step-by-step reasoning trace of what information is missing.\n"
+            "2. Second, you MUST write the exact word `---SUBQUERIES---` on a new line.\n"
+            "3. Finally, provide the sub-queries as a numbered list. Do not add any text after the list."
+        )
+    else:
+        # DEC_LLM: Zero-shot, strict list generation
+        instruction = (
+            "INSTRUCTIONS:\n"
+            "Return ONLY a valid numbered list of the sub-queries. No intro, no filler, no reasoning."
+        )
 
-Main Question: "{question}"
-    
-Example Output:
-1. First search query goes here
-2. Second search query goes here
-
-Plan:
-"""
+    full_prompt = f"{base_prompt}\n\n{instruction}"
     
     # 2. Generate
-    raw_plan = worker.generate(prompt)
+    plan = worker.generate(full_prompt)
     
-    # 3. Cleaning
-    clean_plan = raw_plan.replace("Here is the plan:", "").strip()
-    
-    return clean_plan
+    return plan

@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
+import random
 import json
 import logging
 from datasets import Dataset 
@@ -8,10 +9,20 @@ from src.agent.prompts import format_state_for_prompt
 logger = logging.getLogger(__name__)
 
 
-def load_and_clean_dataset(jsonl_files: list, tokenizer) -> Dataset:
+def load_and_clean_dataset(
+    jsonl_files: list,
+    tokenizer,
+    oversample_config: Optional[Dict[str, object]] = None,
+    rng: Optional[random.Random] = None,
+) -> Dataset:
     
     samples = []
     
+    oversample_config = oversample_config or {}
+    complex_action_ids: Set[int] = set(oversample_config.get("complex_action_ids", []))
+    complex_multiplier = float(oversample_config.get("complex_multiplier", 1.0))
+    rng = rng or random.Random(0)
+
     for fpath in jsonl_files:
         with open(fpath, 'r') as f:
             for line_num, line in enumerate(f):
@@ -35,20 +46,27 @@ def load_and_clean_dataset(jsonl_files: list, tokenizer) -> Dataset:
                         # B. Format Target (Y)
                         # The action the agent took in this step
                         action_id = step["action_id"]
-                        argument = step.get("argument", "")
                         
-                        # Format: " Action: 3" or " Action: 2 search query"
+                        # Format: " Action: 3"
                         # Ensure spacing matches your tokenizer/collator expectation
                         target_text = f" Action: {action_id}"
-                        if argument:
-                            target_text += f" {argument}"
                             
                         # C. Combine
                         # We append an EOS token if packing=False manually, 
                         # though Trainer usually handles it. Adding it explicitly is safer.
                         full_text = prompt_text + target_text + tokenizer.eos_token
                         
-                        samples.append({"text": full_text})
+                        weight = 1.0
+                        if action_id in complex_action_ids:
+                            weight *= complex_multiplier
+
+                        repeat_count = int(weight)
+                        remainder = weight - repeat_count
+                        if rng.random() < remainder:
+                            repeat_count += 1
+
+                        for _ in range(max(1, repeat_count)):
+                            samples.append({"text": full_text})
                         
                 except json.JSONDecodeError:
                     logging.warning(f"Skipping bad JSON in {fpath} line {line_num}")
@@ -60,25 +78,9 @@ def load_and_clean_dataset(jsonl_files: list, tokenizer) -> Dataset:
 # def format_prompt(state: Dict[str, Any]) -> str:
     # return format_state_for_prompt(state)
 
-def format_completion(action_id: int, argument: str) -> str:
+def format_completion(action_id: int) -> str:
     """
     Constructs the target string (the Action).
-    Logic:
-    - If Action 0/1 (Answer): Stop immediately after the digit. No 'Input:'.
-    - If Action 2+ (Tool): Include 'Input: {argument}'.
+    We currently train on the action ID only (no arguments).
     """
-    
-    # --- FIX: STRICT CUTOFF FOR ANSWER ACTIONS ---
-    if int(action_id) in [0, 1]:
-        # The model sees: "Action: 0" -> [EOS]
-        # It never sees "Input: Answer Generation" or even "Input: "
-        return f" Action: {action_id}"
-        
-    # --- LOGIC FOR TOOLS (Search, etc.) ---
-    else:
-        # Sanitize garbage just in case the trajectory generator messed up
-        clean_arg = argument
-        if "Answer Generation" in clean_arg:
-            clean_arg = "" 
-            
-        return f" Action: {action_id}\nInput: {clean_arg}"
+    return f" Action: {action_id}"
