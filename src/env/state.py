@@ -10,7 +10,6 @@ class SubQuery(TypedDict):
     question: str
     status: Literal["PENDING", "ACTIVE", "ANSWERED", "FAILED"]
     answer: Optional[str]        # The extracted fact (e.g., "Shirley Temple")
-    documents: List[Document]    # The raw search hits
 
 class GreenHistoryItem(TypedDict):
     """Lightweight history item (No pre_state recursion)."""

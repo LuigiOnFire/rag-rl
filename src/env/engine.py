@@ -141,7 +141,7 @@ class GreenEngine:
             formatted_docs = self._format_docs(raw_docs)
 
             # 1. Determine which document list we are currently building
-            target_doc_list = active_subquery['documents'] if active_subquery is not None else new_state['documents']
+            target_doc_list = new_state['documents']
             
             # 2. Build a set of hashes we already have in that list
             existing_hashes = {_hash_doc(doc) for doc in target_doc_list}
@@ -202,8 +202,7 @@ class GreenEngine:
                         "id": f"{i}",
                         "question": clean,
                         "status": "PENDING",
-                        "answer": None,
-                        "documents": []
+                        "answer": None
                     })
 
             new_state['subqueries'] = new_subs

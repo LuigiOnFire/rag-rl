@@ -13,3 +13,4 @@ bitsandbytes
 accelerate
 wandb
 faiss-cpu
+sentencepiece

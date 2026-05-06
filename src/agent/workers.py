@@ -120,10 +120,8 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 
     # 2. Gather Relevant Documents (Facts)
     # ------------------------------------
-    # Collect docs from the main state AND all subqueries into one list
-    all_docs = state.get('documents', []) + [
-        d for sub in state.get('subqueries', []) for d in sub.get('documents', [])
-    ]
+    # Collect docs from the main state
+    all_docs = state.get('documents', [])
     
     doc_parts = []
     for doc in all_docs:
@@ -193,7 +191,7 @@ def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) 
     active_query = active_sub['question'] if active_sub is not None else state['question']
 
     # 2. Format Known Information (Targeting the correct document list)
-    target_docs = active_sub['documents'] if active_sub is not None else state.get('documents', [])
+    target_docs = state.get('documents', [])
     known_info_str = ""
     
     if target_docs:
@@ -249,7 +247,7 @@ def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -
     active_query = active_sub['question'] if active_sub is not None else state['question']
 
     # 2. Format Known Information (Targeting the correct document list)
-    target_docs = active_sub['documents'] if active_sub is not None else state.get('documents', [])
+    target_docs = state.get('documents', [])
     known_info_str = ""
     
     if target_docs:
@@ -376,12 +374,6 @@ def generate_reasoning(state: GreenState, use_llm: bool = False) -> str:
             context_str += f"- {doc['content']}\n"
             found_docs = True
 
-    for sub in state.get('subqueries', []):
-        for doc in sub.get('documents', []):
-            if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
-                context_str += f"- {doc['content']}\n"
-                found_docs = True
-                
     if not found_docs:
         context_str = "No external documents found yet."
 
@@ -457,14 +449,6 @@ def generate_plan(state: GreenState, reasoning_mode = False) -> str:
             context_str += f"- {doc['content']}\n"
             found_docs = True
 
-    # Then get subquery docs
-    for sub in state['subqueries']:
-        for doc in sub['documents']:
-            # Leniency: Include UNKNOWN docs if we haven't graded them yet
-            if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
-                context_str += f"- {doc['content']}\n"
-                found_docs = True
-    
     if not found_docs:
         context_str = "No external documents found. Rely on internal knowledge."
     

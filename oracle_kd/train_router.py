@@ -3,10 +3,15 @@ import logging
 import os
 import random
 from typing import Dict
+import wandb
 
 import numpy as np
-from datasets import load_dataset
+import torch
+from torch import nn
+from datasets import load_dataset, ClassLabel
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.utils.class_weight import compute_class_weight
+
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -15,6 +20,9 @@ from transformers import (
     TrainingArguments,
 )
 
+USE_WANDB      = True          # Set False to disable; falls back to log-only
+WANDB_PROJECT  = "thrifty-rag-router"
+WANDB_RUN_NAME = "training-run"
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -66,17 +74,52 @@ def main() -> None:
     set_seed(args.seed)
 
     dataset = load_dataset("csv", data_files=args.input_csv)["train"]
-    dataset = dataset.map(lambda x: {"label": int(x["optimal_trajectory_id"])})
 
+    def assign_routing_label(row):
+            # 1. Parse the boolean and integer safely
+            is_correct = str(row["is_correct"]).strip().lower() in ["true", "1", "t", "yes"]
+            traj_id = int(row["optimal_trajectory_id"])
+            
+            # 2. Apply our routing philosophy
+            if is_correct:
+                # If it succeeded, use the trajectory it succeeded on (0 through 7)
+                label = traj_id
+            elif not is_correct and traj_id == 7:
+                # If it failed on maximum effort (quarantine bin), it is impossible. Label as 8.
+                label = 8
+            else:
+                # If it failed on a lower trajectory (which shouldn't happen with the Oracle, 
+                # but just in case), mark it as -1 to be thrown away.
+                label = -1
+                
+            return {"label": label}
+
+    # First, create the 'label' column using our logic
+    dataset = dataset.map(assign_routing_label)
+    
+    # Then, filter out anything we marked as invalid (-1)
+    dataset = dataset.filter(lambda x: x["label"] != -1)
     label_values = sorted(set(dataset["label"]))
     num_labels = max(label_values) + 1 if label_values else 2
     id2label = {i: f"traj_{i}" for i in range(num_labels)}
     label2id = {v: k for k, v in id2label.items()}
 
+    dataset = dataset.cast_column("label", ClassLabel(num_classes=num_labels, names=list(id2label.values())))
+
     split_kwargs = {"test_size": args.test_size, "seed": args.seed}
     if "label" in dataset.column_names:
         split_kwargs["stratify_by_column"] = "label"
     dataset_split = dataset.train_test_split(**split_kwargs)
+    
+    train_labels = dataset_split["train"]["label"]
+    unique_labels = np.unique(train_labels)
+
+    # Calculate balanced weights (race classes get high weights)
+    class_weights = compute_class_weight("balanced", classes=unique_labels, y=train_labels)
+
+    # Move this to the GPU in the trainer
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
+    logging.info(f"Computed Class Weights: {class_weights_tensor}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
 
@@ -99,7 +142,7 @@ def main() -> None:
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=args.learning_rate,
         per_device_train_batch_size=args.batch_size,
@@ -111,15 +154,39 @@ def main() -> None:
         greater_is_better=True,
         save_total_limit=2,
         logging_steps=25,
-        report_to=[],
+        report_to=["wandb"],
+        run_name=f"thrifty-router-{args.model_name.split('/')[-1]}",
+        bf16=True,                # Use Brain Float 16 to prevent overflow
+        max_grad_norm=1.0,        # Clip exploding gradients
+        warmup_ratio=0.1,         # Gently warm up the learning rate over the first 10% of training
     )
 
-    trainer = Trainer(
+    wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
+
+    class WeightedTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, numitems_in_batch=None):
+            # Extract labels
+            labels = inputs.pop("labels")
+            # Run the forward passs
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            # Moe weights to the same device as model
+            weights = class_weights_tensor.to(model.device)
+
+            # Apply weighted Cross Entropy Loss
+            loss_fct = nn.CrossEntropyLoss(weight=weights)
+            loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+            return (loss, outputs) if return_outputs else loss
+
+
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )

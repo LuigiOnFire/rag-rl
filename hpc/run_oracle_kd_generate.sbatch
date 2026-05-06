@@ -16,7 +16,7 @@ echo "Starting Oracle KD generation on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
 # Optional: pass extra CLI args via ORACLE_KD_ARGS
-ORACLE_KD_ARGS=${ORACLE_KD_ARGS:-"--datasets hotpot --limit 100 --setting distractor --split train"}
+ORACLE_KD_ARGS=${ORACLE_KD_ARGS:-"--datasets hotpot --setting fullwiki --split train"}
 
 # 2. The Container Wrap
 apptainer exec --nv \

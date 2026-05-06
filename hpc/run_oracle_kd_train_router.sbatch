@@ -9,14 +9,20 @@
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/oracle_kd_train_router_%j.out
 
+# get an argument
+INPUT_CSV=${1:-"data/oracle/oracle_training_data.csv"}
+
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
 echo "Starting Oracle KD router training on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
-# Optional: pass extra CLI args via ROUTER_TRAIN_ARGS
-ROUTER_TRAIN_ARGS=${ROUTER_TRAIN_ARGS:-"--input-csv data/oracle/oracle_training_data.csv --model-name microsoft/deberta-v3-base --output-dir models/router"}
+# Get a nice argument
+INPUT_CSV=${1:-"data/oracle/oracle_training_data.csv"}
+echo "Using input CSV: $INPUT_CSV"
+
+export ROUTER_TRAIN_ARGS="--input-csv $INPUT_CSV --model-name microsoft/deberta-v3-base --output-dir models/router --epochs 10"
 
 apptainer exec --nv \
         --bind /scratch.hpc/$USER:/scratch.hpc/$USER \

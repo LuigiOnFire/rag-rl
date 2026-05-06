@@ -153,12 +153,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate cascading oracle labels.")
     parser.add_argument("--datasets", nargs="+", default=["hotpot"], help="Dataset names.")
     parser.add_argument("--limit", type=int, default=8500, help="Samples per dataset.") # The theoritical limit for 48 hours
-    parser.add_argument("--setting", default="distractor", help="Dataset setting.")
+    parser.add_argument("--setting", default="fullwiki", help="Dataset setting.")
     parser.add_argument("--split", default="train", help="Dataset split.")
     parser.add_argument("--output", default="data/oracle/oracle_training_data.csv")
     parser.add_argument("--history-output", default="data/oracle/oracle_trajectory_history.jsonl")
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--offset", type=int, default=0, help="Number of samples to skip before starting.")
     return parser.parse_args()
 
 
@@ -185,31 +186,55 @@ def main() -> None:
     dataset_configs = {
         name: {"setting": args.setting, "split": args.split} for name in args.datasets
     }
+
+    print("Using the following datasets: {}".format(", ".join(args.datasets)))
+
+
     streamer = MixedStreamer(
         dataset_names=args.datasets,
-        limit=args.limit,
+        limit=args.limit + args.offset,        
         shuffle=args.shuffle,
         configs=dataset_configs,
     )
 
     logging.info(
-        "Streaming %s of %s available examples from %s",
+        "Streaming %s examples (starting at offset %s) of %s available from %s",
         streamer.n_limit,
+        args.offset,
         streamer.total_available,
-        ", ".join(args.datasets),
+        ", ".join(args.datasets),    
     )
 
     init_csv(args.output)
 
     total = streamer.n_limit
+    processed_count = 0  # how many we've actually done, which may be less than idx due to offset and skips
     for idx, sample in enumerate(streamer.stream()):
+        # skip for offset
+        if idx < args.offset:
+            if (idx + 1) % 1000 == 0:
+                logging.info(f"Skipping offset rows... ({idx + 1}/{args.offset})")
+            continue
+
+        # stop for the limit 
+        if processed_count >= args.limit:
+            logging.info(f"Reached limit of {args.limit} generated samples. Stopping.")
+            break
+
         question = sample["question"]
         ground_truth = sample.get("ground_truth") or sample.get("answer", "")
         corpus = sample.get("corpus", [])
 
-        if not corpus:
-            logging.warning("Skipping sample with empty corpus: %s", question)
-            continue
+        if args.setting == "distractor":
+            if not corpus:
+                logging.warning("Skipping sample with empty distractor corpus: %s", question)
+                continue
+            # Build a tiny 10-paragraph retriever
+            retriever = EphemeralRetriever(documents=corpus)
+
+        elif args.setting == "fullwiki":
+            # Ignore the empty corpus, use the 5-million doc Wikipedia dump
+            retriever = global_retriever
 
         retriever = EphemeralRetriever(documents=corpus)
         engine = GreenEngine(retriever=retriever)
@@ -263,8 +288,9 @@ def main() -> None:
             ],
         )
 
-        if (idx + 1) % 10 == 0:
-            logging.info("Processed %s/%s", idx + 1, total)
+        processed_count += 1
+        if processed_count % 10 == 0:
+            logging.info("Processed %s/%s", processed_count, args.limit)
 
     logging.info("Done. Output saved to %s", args.output)
 
