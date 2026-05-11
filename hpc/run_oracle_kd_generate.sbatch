@@ -4,9 +4,9 @@
 #SBATCH --partition=l40s
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
-#SBATCH --time=12:00:00
+#SBATCH --time=60:00:00
 #SBATCH --output=logs/oracle_kd_generate_%j.out
 
 # 1. Load the secure .env file

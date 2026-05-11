@@ -13,7 +13,7 @@ sys.path.append(os.getcwd())
 from src.agent import actions
 from src.data.loader import MixedStreamer
 from src.env.engine import GreenEngine
-from src.env.retriever import EphemeralRetriever
+from src.env.retriever import EphemeralRetriever, GlobalRetriever
 from src.env.state import create_initial_state, get_active_subquery, GreenState
 from src.oracle.judge import SoftJudge
 from src.oracle.search import strategy_cost
@@ -152,7 +152,7 @@ def append_rows(output_path: str, rows: List[Dict[str, object]]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate cascading oracle labels.")
     parser.add_argument("--datasets", nargs="+", default=["hotpot"], help="Dataset names.")
-    parser.add_argument("--limit", type=int, default=8500, help="Samples per dataset.") # The theoritical limit for 48 hours
+    parser.add_argument("--limit", type=int, default=11000, help="Samples per dataset.") # Recalculated for about 60 hours but with fullwiki it will be slower
     parser.add_argument("--setting", default="fullwiki", help="Dataset setting.")
     parser.add_argument("--split", default="train", help="Dataset split.")
     parser.add_argument("--output", default="data/oracle/oracle_training_data.csv")
@@ -234,9 +234,8 @@ def main() -> None:
 
         elif args.setting == "fullwiki":
             # Ignore the empty corpus, use the 5-million doc Wikipedia dump
-            retriever = global_retriever
+            retriever = GlobalRetriever.get_instance()
 
-        retriever = EphemeralRetriever(documents=corpus)
         engine = GreenEngine(retriever=retriever)
 
         chosen_id = None

@@ -22,7 +22,7 @@ export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 INPUT_CSV=${1:-"data/oracle/oracle_training_data.csv"}
 echo "Using input CSV: $INPUT_CSV"
 
-export ROUTER_TRAIN_ARGS="--input-csv $INPUT_CSV --model-name microsoft/deberta-v3-base --output-dir models/router --epochs 10"
+export ROUTER_TRAIN_ARGS="--input-csv $INPUT_CSV --model-name microsoft/deberta-v3-base --output-dir models/router --epochs 40"
 
 apptainer exec --nv \
         --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
