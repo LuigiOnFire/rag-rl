@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from .hotpot import HotpotQAStreamer
 from .musique import MusiqueStreamer
 from .twowiki import TwoWikiStreamer
+from .squad import SQuADStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 DATASET_REGISTRY = {
     "hotpot": HotpotQAStreamer,
     "musique": MusiqueStreamer,
-    "twowiki": TwoWikiStreamer
+    "twowiki": TwoWikiStreamer,
+    "squad": SQuADStreamer
 }
 
 class MixedStreamer:

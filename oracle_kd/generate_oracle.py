@@ -152,6 +152,13 @@ def append_rows(output_path: str, rows: List[Dict[str, object]]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate cascading oracle labels.")
     parser.add_argument("--datasets", nargs="+", default=["hotpot"], help="Dataset names.")
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="hotpotqa",
+        choices=["hotpotqa", "squad"],
+        help="High-level dataset selector (hotpotqa or squad).",
+    )
     parser.add_argument("--limit", type=int, default=11000, help="Samples per dataset.") # Recalculated for about 60 hours but with fullwiki it will be slower
     parser.add_argument("--setting", default="fullwiki", help="Dataset setting.")
     parser.add_argument("--split", default="train", help="Dataset split.")
@@ -187,11 +194,16 @@ def main() -> None:
         name: {"setting": args.setting, "split": args.split} for name in args.datasets
     }
 
-    print("Using the following datasets: {}".format(", ".join(args.datasets)))
+    # Determine dataset names based on --dataset-name arg
+    if args.dataset_name == "squad":
+        dataset_names = ["squad"]
+    else:
+        dataset_names = args.datasets
 
+    print("Using the following datasets: {}".format(", ".join(dataset_names)))
 
     streamer = MixedStreamer(
-        dataset_names=args.datasets,
+        dataset_names=dataset_names,
         limit=args.limit + args.offset,        
         shuffle=args.shuffle,
         configs=dataset_configs,
@@ -202,7 +214,7 @@ def main() -> None:
         streamer.n_limit,
         args.offset,
         streamer.total_available,
-        ", ".join(args.datasets),    
+        ", ".join(dataset_names),    
     )
 
     init_csv(args.output)
