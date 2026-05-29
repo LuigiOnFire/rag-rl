@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
-#SBATCH --time=16:00:00
-#SBATCH --output=logs/%j.out
+#SBATCH --time=60:00:00
+#SBATCH --output=logs/%j_oracle_kd_generate.out
 
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
@@ -25,28 +25,15 @@ fi
 
 echo "Dataset: $DATASET_NAME"
 
-# Build ORACLE_KD_ARGS based on dataset with dataset-specific defaults
-if [[ $# -gt 0 ]]; then
-    # Additional args provided after dataset name (may override defaults)
-    ORACLE_KD_ARGS="--dataset-name $DATASET_NAME $*"
-else
-    # Use dataset-specific defaults (including offset)
-    case $DATASET_NAME in
-        squad)
-            # For now, use same Wikipedia retriever as hotpot
-            # (Architecture ready for future --retriever squad_wiki flag)
-            # Default offset=0 for squad (no prior offset needed)
-            ORACLE_KD_ARGS="--dataset-name squad --setting fullwiki --offset 0"
-            ;;
-        *)
-            # HotpotQA: skip first 6390 to continue from previous run
-            ORACLE_KD_ARGS="--dataset-name hotpotqa --setting fullwiki --split train --offset 6390"
-            ;;
-    esac
-fi
-export ORACLE_KD_ARGS
+# Build the oracle args as an array so offsets like '--offset 100' survive intact.
+ORACLE_KD_ARGS=(--dataset-name "$DATASET_NAME" --setting fullwiki --execution-mode all_routes --split train)
 
-echo "Using ORACLE_KD_ARGS: $ORACLE_KD_ARGS"
+
+if [[ $# -gt 0 ]]; then
+    ORACLE_KD_ARGS+=("$@")
+fi
+
+echo "Using ORACLE_KD_ARGS: ${ORACLE_KD_ARGS[*]}"
 
 # 2. The Container Wrap
 apptainer exec --nv \
@@ -55,7 +42,7 @@ apptainer exec --nv \
         pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
         bash -c '
             echo "Starting Ollama inside container..."
-            echo "Container ORACLE_KD_ARGS: $ORACLE_KD_ARGS"
+            echo "Container ORACLE_KD_ARGS: $*"
             export OLLAMA_MODELS="./ollama_models"
             ./bin/ollama serve > logs/ollama_oracle_kd.log 2>&1 &
             OLLAMA_PID=$!
@@ -68,10 +55,10 @@ apptainer exec --nv \
             ./bin/ollama pull $SLM_MODEL
 
             echo "Running Oracle KD generator..."
-            .venv/bin/python -u oracle_kd/generate_oracle.py $ORACLE_KD_ARGS
+            .venv/bin/python -u oracle_kd/generate_oracle.py "$@"
 
             echo "Cleaning up..."
             kill $OLLAMA_PID
-        '
+        ' bash "${ORACLE_KD_ARGS[@]}"
 
 echo "Oracle KD generation complete."

@@ -1,17 +1,40 @@
 import os
 import pickle
+import argparse
 import faiss
 from sentence_transformers import SentenceTransformer
 
-IN_CORPUS = "data/meta/fullwiki_corpus.pkl"
-OUT_FAISS = "data/meta/retriever_dense_fullwiki.faiss"
+# Corpus-specific configurations
+CORPUS_CONFIGS = {
+    "fullwiki": {
+        "in_corpus": "data/meta/fullwiki_corpus.pkl",
+        "out_faiss": "data/meta/retriever_dense_fullwiki.faiss"
+    },
+    "squad_wiki": {
+        "in_corpus": "data/meta/squad_wiki_corpus.pkl",
+        "out_faiss": "data/meta/retriever_dense_squad_wiki.faiss"
+    }
+}
 
 def main():
-    if not os.path.exists(IN_CORPUS):
-        raise FileNotFoundError(f"{IN_CORPUS} not found. Please run scripts/00_prepare_corpus.py first.")
+    parser = argparse.ArgumentParser(description="Build dense (FAISS) index for retrieval.")
+    parser.add_argument(
+        "--corpus-type",
+        default="fullwiki",
+        choices=["fullwiki", "squad_wiki"],
+        help="Corpus type: fullwiki (HotpotQA) or squad_wiki (DPR)"
+    )
+    args = parser.parse_args()
 
-    print(f"Loading corpus from {IN_CORPUS}...")
-    with open(IN_CORPUS, "rb") as f:
+    config = CORPUS_CONFIGS[args.corpus_type]
+    in_corpus = config["in_corpus"]
+    out_faiss = config["out_faiss"]
+
+    if not os.path.exists(in_corpus):
+        raise FileNotFoundError(f"{in_corpus} not found. Please run scripts/00_build_corpus.py --corpus-type {args.corpus_type} first.")
+
+    print(f"Loading corpus from {in_corpus}...")
+    with open(in_corpus, "rb") as f:
         documents = pickle.load(f)
     print(f"Loaded {len(documents)} documents.")
 
@@ -34,10 +57,10 @@ def main():
     index = faiss.IndexFlatIP(dimension)
     index.add(embeddings)
     
-    os.makedirs(os.path.dirname(OUT_FAISS), exist_ok=True)
+    os.makedirs(os.path.dirname(out_faiss), exist_ok=True)
     
-    print(f"Saving FAISS index to {OUT_FAISS}...")
-    faiss.write_index(index, OUT_FAISS)
+    print(f"Saving FAISS index to {out_faiss}...")
+    faiss.write_index(index, out_faiss)
 
     print("Dense index generation complete!")
 

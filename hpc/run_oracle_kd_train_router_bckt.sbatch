@@ -7,7 +7,7 @@
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --time=08:00:00
-#SBATCH --output=logs/%j.out
+#SBATCH --output=logs/%j_train_router_bckt.out
 
 # get an argument
 INPUT_CSV=${1:-"data/oracle/oracle_training_data.csv"}
@@ -22,6 +22,9 @@ export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 INPUT_CSV=${1:-"data/oracle/oracle_training_data.csv"} 
 echo "Using input CSV: $INPUT_CSV"
 
+
+# microsoft/deberta-v3-base
+# bert-base-uncased
 export ROUTER_TRAIN_ARGS="--input-csv $INPUT_CSV --model-name microsoft/deberta-v3-base --output-dir models/router --epochs 40 --routing-strategy bucket"
 
 apptainer exec --nv \

@@ -16,10 +16,36 @@ from src.env.engine import GreenEngine
 from src.env.retriever import EphemeralRetriever, GlobalRetriever
 from src.env.state import create_initial_state, get_active_subquery, GreenState
 from src.oracle.judge import SoftJudge
-from src.oracle.search import strategy_cost
 
 
 TrajectoryFn = Callable[[], List]
+
+
+def load_cost_table(cost_table_path: str = "data/meta/cost_table.json") -> Dict[str, float]:
+    try:
+        with open(cost_table_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.warning("%s not found. Using default costs (1.0).", cost_table_path)
+        return {}
+
+
+def get_action_cost(cost_table: Dict[str, float], action_id: int) -> float:
+    return float(cost_table.get(str(action_id), 1.0))
+
+
+# Keep this aligned with the calibrator assumption used elsewhere.
+AVG_DECOMPOSE_SUBQUERIES = 3
+
+
+def strategy_cost(strategy: list, cost_table: Dict[str, float]) -> float:
+    total = 0.0
+    for entry in strategy:
+        if isinstance(entry, tuple):
+            total += AVG_DECOMPOSE_SUBQUERIES * sum(get_action_cost(cost_table, a) for a in entry)
+        else:
+            total += get_action_cost(cost_table, entry)
+    return total
 
 
 def traj_direct_llm() -> List:
@@ -76,7 +102,8 @@ def build_trajectories() -> List[Dict[str, object]]:
         {"name": "heavy_decompose_retreive_reason", "fn": traj_heavy_decompose_retreive_reason}
     ]
 
-    costs = [strategy_cost(t["fn"]()) for t in trajectories]
+    cost_table = load_cost_table()
+    costs = [strategy_cost(t["fn"](), cost_table) for t in trajectories]
     for i in range(len(costs) - 1):
         if costs[i] > costs[i + 1]:
 
@@ -84,7 +111,7 @@ def build_trajectories() -> List[Dict[str, object]]:
                 "Trajectory list is not cost-ordered. "
                 f"{trajectories[i]['name']} ({costs[i]:.4f}) > "
                 f"{trajectories[i + 1]['name']} ({costs[i + 1]:.4f})."
-                f"Order should be: {[t['name'] + ': ' + str(strategy_cost(t['fn']())) for t in sorted(trajectories, key=lambda x: strategy_cost(x['fn']()))]}"
+                f"Order should be: {[t['name'] + ': ' + str(strategy_cost(t['fn'](), cost_table)) for t in sorted(trajectories, key=lambda x: strategy_cost(x['fn'](), cost_table))]}"
             )
 
     return trajectories
@@ -167,6 +194,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--offset", type=int, default=0, help="Number of samples to skip before starting.")
+    parser.add_argument(
+        "--execution-mode",
+        type=str,
+        default="first_success",
+        choices=["first_success", "all_routes"],
+        help="Route execution mode: stop at first correct route or run all routes and log each attempt.",
+    )
     return parser.parse_args()
 
 
@@ -180,14 +214,15 @@ def main() -> None:
     default_output = "data/oracle/oracle_training_data.csv"
     if args.output == default_output:
         run_id = time.strftime("%Y%m%d_%H%M%S")
-        args.output = f"data/oracle/oracle_training_data_{run_id}.csv"
+        args.output = f"data/oracle/oracle_training_data_{args.dataset_name}_{run_id}.csv"
 
     default_history_output = "data/oracle/oracle_trajectory_history.jsonl"
     if args.history_output == default_history_output:
         run_id = time.strftime("%Y%m%d_%H%M%S")
-        args.history_output = f"data/oracle/oracle_trajectory_history_{run_id}.jsonl"
+        args.history_output = f"data/oracle/oracle_trajectory_history_{args.dataset_name}_{run_id}.jsonl"
 
     trajectories = build_trajectories()
+    cost_table = load_cost_table()
     judge = SoftJudge()
 
     dataset_configs = {
@@ -245,8 +280,12 @@ def main() -> None:
             retriever = EphemeralRetriever(documents=corpus)
 
         elif args.setting == "fullwiki":
-            # Ignore the empty corpus, use the 5-million doc Wikipedia dump
-            retriever = GlobalRetriever.get_instance()
+            # Select retriever corpus based on dataset
+            # SQuAD uses DPR Wikipedia (squad_wiki), others use default Wikipedia (fullwiki)
+            if args.dataset_name == "squad":
+                retriever = GlobalRetriever.get_instance(corpus_type="squad_wiki")
+            else:
+                retriever = GlobalRetriever.get_instance(corpus_type="fullwiki")
 
         engine = GreenEngine(retriever=retriever)
 
@@ -254,6 +293,8 @@ def main() -> None:
         joules_spent = 0.0
         is_correct = False
         last_state = None
+        best_correct_state = None
+        attempt_records = []
 
         for traj_idx, traj in enumerate(trajectories):
             start_state = create_initial_state(question)
@@ -263,12 +304,28 @@ def main() -> None:
 
             final_answer = final_state.get("answer") or ""
             judged_correct, _ = judge.judge(final_answer, ground_truth, question)
+            measured_joules = float(final_state.get("total_joules", 0.0))
+
+            attempt_records.append(
+                {
+                    "trajectory_id": traj_idx,
+                    "trajectory_name": traj["name"],
+                    "estimated_cost": float(strategy_cost(strategy, cost_table)),
+                    "measured_joules": measured_joules,
+                    "is_correct": bool(judged_correct),
+                    "status": final_state.get("status", ""),
+                }
+            )
 
             if judged_correct:
-                chosen_id = traj_idx
-                joules_spent = float(final_state.get("total_joules", 0.0))
-                is_correct = True
-                break
+                if chosen_id is None:
+                    chosen_id = traj_idx
+                    joules_spent = measured_joules
+                    best_correct_state = final_state
+                    is_correct = True
+
+                if args.execution_mode == "first_success":
+                    break
 
         if chosen_id is None:
             chosen_id = len(trajectories) - 1
@@ -294,7 +351,9 @@ def main() -> None:
                     "optimal_trajectory_id": chosen_id,
                     "joules_spent": joules_spent,
                     "is_correct": is_correct,
-                    "history": final_state.get("history", []) if is_correct else [],
+                    "execution_mode": args.execution_mode,
+                    "attempts": attempt_records,
+                    "history": best_correct_state.get("history", []) if is_correct and best_correct_state is not None else [],
                 }
             ],
         )

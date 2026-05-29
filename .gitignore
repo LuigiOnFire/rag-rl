@@ -34,3 +34,7 @@ ollama
 
 # Swapfiles
 *.swp
+
+# Data
+*.csv
+*.json
