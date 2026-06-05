@@ -11,6 +11,7 @@ from typing import Callable, Dict, List, Tuple
 sys.path.append(os.getcwd())
 
 from src.agent import actions
+from src.agent import workers
 from src.data.loader import MixedStreamer
 from src.env.engine import GreenEngine
 from src.env.retriever import EphemeralRetriever, GlobalRetriever
@@ -79,14 +80,14 @@ def traj_decompose_key_slm() -> List:
 def traj_decompose_retreive_reason() -> List:
     return [
         actions.ACTION_DEC_LLM,
-        (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
+        (actions.ACTION_RET_VEC, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
         actions.ACTION_GEN_LLM,
     ]
 
 def traj_heavy_decompose_retreive_reason() -> List:
     return [
         actions.ACTION_DEC_RSN,
-        (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_LLM),
+        (actions.ACTION_RET_VEC, actions.ACTION_RSN_SLM, actions.ACTION_GEN_LLM),
         actions.ACTION_GEN_LLM,
     ]
 
@@ -221,6 +222,11 @@ def main() -> None:
         run_id = time.strftime("%Y%m%d_%H%M%S")
         args.history_output = f"data/oracle/oracle_trajectory_history_{args.dataset_name}_{run_id}.jsonl"
 
+    trace_run_id = time.strftime("%Y%m%d_%H%M%S")
+    trace_dir = f"data/oracle/oracle_{trace_run_id}_query_traces"
+    os.makedirs(trace_dir, exist_ok=True)
+    logging.info("Worker trace logs will be written to %s", trace_dir)
+
     trajectories = build_trajectories()
     cost_table = load_cost_table()
     judge = SoftJudge()
@@ -272,6 +278,9 @@ def main() -> None:
         ground_truth = sample.get("ground_truth") or sample.get("answer", "")
         corpus = sample.get("corpus", [])
 
+        query_log_path = os.path.join(trace_dir, f"q_{processed_count:06d}.log")
+        workers.configure_worker_logging(query_log_path)
+
         if args.setting == "distractor":
             if not corpus:
                 logging.warning("Skipping sample with empty distractor corpus: %s", question)
@@ -296,6 +305,7 @@ def main() -> None:
         best_correct_state = None
         attempt_records = []
 
+        # THIS IS THE MAIN LOOP
         for traj_idx, traj in enumerate(trajectories):
             start_state = create_initial_state(question)
             strategy = traj["fn"]()

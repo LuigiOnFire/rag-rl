@@ -170,6 +170,7 @@ def _compute_stats(records: Sequence[dict]) -> Dict[str, object]:
     tier_costs: Dict[str, List[float]] = defaultdict(list)
     misrouting_penalties: List[float] = []
     index_scale_samples: Dict[str, List[float]] = defaultdict(list)
+    trajectory_joules: Dict[int, List[float]] = defaultdict(list)
     accuracy_counts: Dict[str, Dict[int, Counter]] = defaultdict(lambda: defaultdict(Counter))
 
     for dataset_name, dataset_rows in dataset_records.items():
@@ -192,11 +193,19 @@ def _compute_stats(records: Sequence[dict]) -> Dict[str, object]:
 
             if record.get("is_correct") and int(record.get("optimal_trajectory_id", -1)) in SINGLE_HOP_LOOKUP_IDS:
                 index_scale_samples[dataset_name].append(float(record.get("joules_spent", 0.0)))
+            # record joules for the chosen trajectory when it was selected
+            try:
+                chosen = int(record.get("optimal_trajectory_id", -1))
+                if chosen >= 0:
+                    trajectory_joules[chosen].append(float(record.get("joules_spent", 0.0)))
+            except Exception:
+                pass
 
     return {
         "tier_costs": tier_costs,
         "misrouting_penalties": misrouting_penalties,
         "index_scale_samples": index_scale_samples,
+        "trajectory_joules": trajectory_joules,
         "accuracy_counts": accuracy_counts,
         "trajectory_names": trajectory_names,
     }
@@ -219,15 +228,16 @@ def _print_stats(records: Sequence[dict], source_label: str) -> None:
         print(f"  - {dataset_name}: {count}")
 
     print("\n==================================================")
-    print("1. AVERAGE ENERGY COST PER TIER (Joules)")
+    print("1. ENERGY COST PER TRAJECTORY (Joules)")
     print("==================================================")
-    tier_rows = []
-    for tier_name in ("minimal", "intensive", "guardrail"):
-        values = tier_costs.get(tier_name, [])
-        tier_rows.append(
-            [tier_name.title(), str(len(values)), f"{_safe_mean(values):.2f}" if values else "n/a"]
-        )
-    _print_table(["Tier", "Samples", "Avg Joules"], tier_rows)
+    traj_rows = []
+    trajectory_joules = stats.get("trajectory_joules", {})
+    traj_ids = sorted(set(list(trajectory_joules.keys()) + list(trajectory_names.keys())))
+    for traj_id in traj_ids:
+        samples = trajectory_joules.get(traj_id, [])
+        name = trajectory_names.get(traj_id, f"traj_{traj_id}")
+        traj_rows.append([f"{traj_id}: {name}", str(len(samples)), f"{_safe_mean(samples):.2f}" if samples else "n/a"])
+    _print_table(["Trajectory", "Samples", "Avg Joules"], traj_rows)
 
     print("\n==================================================")
     print("2. COST OF MISROUTING (SQuAD -> Complex Pipeline)")

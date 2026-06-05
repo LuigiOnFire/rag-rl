@@ -102,6 +102,8 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 
     # Determine the active query by using the ID
     active_sub_query = get_active_subquery(state)
+    is_subquery = active_sub_query is not None
+
     if active_sub_query is None:
         question_text = state['question']
     else:
@@ -130,7 +132,6 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
         if doc.get('relevance', 'UNKNOWN') in ["RELEVANT", "UNKNOWN"]:
             title = doc.get('title', 'Unknown Source')
             content = doc.get('content', '').strip()
-            # Standard Format: "- [Title]: Content"
             doc_parts.append(f"- [{title}]: {content}")
     
     # 3. Handle Fallback & Assembly
@@ -153,12 +154,32 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
     # print(f" Worker context length: {len(context_str)} characters.")
     # print(f" Worker context preview:\n{context_str[:500]}...\n")
 
-    # 2. Prompt
-    prompt = f"""
+    # 4. Prompt Generation
+    # -------------------
+    if is_subquery:
+        # PURE EXTRACTION: For intermediate steps. No comparing facts or forcing "winning entities".
+        prompt = f"""
 ### INSTRUCTION
-Extract the exact answer to the User Question from the Context below.
+Extract the exact answer to the Sub-Question from the Context below.
+Output ONLY the specific entity, date, or fact requested. Be brief and concise. Do not write complete sentences.
+If the answer is not in the context, output exactly: "No relevant information found."
+
+### CURRENT TASK
+{_brain_context(state, "Sub-query answer extraction")}
+Context:
+{context_str}
+
+Sub-Question: "{question_text}"
+
+### ANSWER
+"""
+    else:
+        # SYNTHESIS & COMPARISON: For the final answer. Strictly forces a winning entity.
+        prompt = f"""
+### INSTRUCTION
+Extract the exact answer to the Main User Question from the Context below.
 Output ONLY the entity (name, date, number). Do not write complete sentences. Be robotic and concise.
-Do not list facts. Compare the facts and output ONLY the final winning entity."
+Do not list facts. Compare the facts and output ONLY the final winning entity.
 
 ### EXAMPLES
 Question: "What is the capital of France?"
@@ -168,11 +189,11 @@ Question: "Who won the 1996 World Series?"
 Good Answer: "New York Yankees"
 
 ### CURRENT TASK
-{_brain_context(state, "Answer synthesis")}
+{_brain_context(state, "Final answer synthesis")}
 Context:
 {context_str}
 
-Question: "{question_text}"
+Main Question: "{question_text}"
 
 ### ANSWER
 """
@@ -459,6 +480,8 @@ def generate_plan(state: GreenState, reasoning_mode = False) -> str:
         f"{_brain_context(state, 'Decomposition planning')}\n"
         f"Context:\n{context_str}\n\n"
         "Task: Break down the Main Question into 2-4 simple, independent search queries."
+        "CRITICAL: Every sub-query must be fully self-contained. NEVER use pronouns (he, she, it, they). "
+        "Always repeat the specific names or entities involved."
     )
 
     if reasoning_mode:
