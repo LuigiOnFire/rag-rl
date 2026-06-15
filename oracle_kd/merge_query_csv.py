@@ -6,6 +6,7 @@ DATA_DIR = "oracle_kd/data/training"
 SOURCE_FILES = {
     "hotpotqa": os.path.join(DATA_DIR, "hotpotqa_queries.csv"),
     "squad": os.path.join(DATA_DIR, "squad_queries.csv"),
+    "nq": os.path.join(DATA_DIR, "nq_queries.csv"),
 }
 MASTER_FILE = os.path.join(DATA_DIR, "master_queries.csv")
 
@@ -51,6 +52,8 @@ def get_source_file(file_path):
         return "hotpotqa"
     elif "squad" in file_path.lower():
         return "squad"
+    elif "nq" in file_path.lower():
+        return "nq"
     else:
         raise ValueError("Unable to identify source from filename. Please ensure it contains 'hotpot' or 'squad'.")
 

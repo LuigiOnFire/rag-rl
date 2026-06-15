@@ -6,6 +6,7 @@ from .hotpot import HotpotQAStreamer
 from .musique import MusiqueStreamer
 from .twowiki import TwoWikiStreamer
 from .squad import SQuADStreamer
+from .nq import NQStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,8 @@ DATASET_REGISTRY = {
     "hotpot": HotpotQAStreamer,
     "musique": MusiqueStreamer,
     "twowiki": TwoWikiStreamer,
-    "squad": SQuADStreamer
+    "squad": SQuADStreamer,
+    "nq": NQStreamer
 }
 
 class MixedStreamer:

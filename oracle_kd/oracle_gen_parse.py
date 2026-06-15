@@ -20,8 +20,9 @@ def _normalize_dataset_name(name: Optional[str]) -> str:
         return "hotpotqa"
     if normalized in {"squad", "squad_v2", "squadv2"}:
         return "squad"
+    if normalized in {"nq", "nq_open", "natural_questions", "naturalquestions"}:
+        return "nq"
     return normalized
-
 
 def _infer_dataset_from_path(path: Path) -> str:
     stem = path.stem.lower()
@@ -29,6 +30,8 @@ def _infer_dataset_from_path(path: Path) -> str:
         return "hotpotqa"
     if "squad" in stem:
         return "squad"
+    if "nq" in stem:
+        return "nq"
     return "unknown"
 
 
@@ -179,7 +182,7 @@ def _compute_stats(records: Sequence[dict]) -> Dict[str, object]:
 
             simple_attempt = _cheapest_successful_attempt(record, SIMPLE_TRAJECTORY_IDS)
             complex_attempt = _cheapest_successful_attempt(record, COMPLEX_TRAJECTORY_IDS)
-            if dataset_name == "squad" and simple_attempt is not None and complex_attempt is not None:
+            if dataset_name in ("squad", "nq") and simple_attempt is not None and complex_attempt is not None:
                 misrouting_penalties.append(
                     float(complex_attempt.get("measured_joules", 0.0))
                     - float(simple_attempt.get("measured_joules", 0.0))
@@ -253,25 +256,35 @@ def _print_stats(records: Sequence[dict], source_label: str) -> None:
     print("==================================================")
     squad_values = index_scale_samples.get("squad", [])
     hotpot_values = index_scale_samples.get("hotpotqa", [])
+    nq_values = index_scale_samples.get("nq", [])
+
+    if squad_values:
+        print(f"SQuAD mean (selected routes 1-2): {_safe_mean(squad_values):.2f} J")
+    if nq_values:
+        print(f"NQ mean (selected routes 1-2): {_safe_mean(nq_values):.2f} J")
+        
     if squad_values and hotpot_values:
         squad_mean = _safe_mean(squad_values)
         hotpot_mean = _safe_mean(hotpot_values)
         delta = squad_mean - hotpot_mean
         pct = (delta / hotpot_mean) * 100 if hotpot_mean else float("nan")
-        print(f"SQuAD mean (selected routes 1-2): {squad_mean:.2f} J")
         print(f"HotpotQA mean (selected routes 1-2): {hotpot_mean:.2f} J")
-        print(f"Index scale tax: {delta:.2f} J ({pct:.2f}% over HotpotQA)")
+        print(f"Index scale tax (SQuAD vs HotpotQA): {delta:.2f} J ({pct:.2f}% over HotpotQA)")
     else:
         print("Insufficient SQuAD/HotpotQA single-hop lookup data to compute the tax.")
 
     print("\n==================================================")
     print("4. ACCURACY CEILINGS BY TRAJECTORY AND DATASET")
     print("==================================================")
-    dataset_order = [dataset for dataset in ("hotpotqa", "squad") if dataset in accuracy_counts]
+    
+    # ADD 'nq' TO THE DATASET ORDER
+    dataset_order = [dataset for dataset in ("hotpotqa", "squad", "nq") if dataset in accuracy_counts]
     all_trajectory_ids = sorted({trajectory_id for dataset in dataset_order for trajectory_id in accuracy_counts[dataset].keys()})
 
-    dataset_labels = {"hotpotqa": "HotpotQA", "squad": "SQuAD"}
+    # ADD 'nq' TO THE LABELS
+    dataset_labels = {"hotpotqa": "HotpotQA", "squad": "SQuAD", "nq": "NatQuestions"}
     header = ["Trajectory"] + [dataset_labels.get(dataset, dataset.title()) for dataset in dataset_order] + ["Overall"]
+    
     rows = []
     for trajectory_id in all_trajectory_ids:
         row = [f"{trajectory_id}: {trajectory_names.get(trajectory_id, f'traj_{trajectory_id}')}"]

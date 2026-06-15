@@ -50,7 +50,7 @@ class GlobalRetriever:
     """
     Simulates a massive vector DB by loading a pre-built index consisting of a 
     large corpus of documents (e.g. all original Wikipedia abstracts).
-    Supports multiple corpus types: 'fullwiki' and 'squad_wiki'.
+    Supports multiple corpus types: 'fullwiki' and 'dpr_wik'.
     """
     _instances = {}  # Cache instances per corpus type
     
@@ -60,7 +60,7 @@ class GlobalRetriever:
         Get or create a GlobalRetriever instance for a specific corpus type.
         
         Args:
-            corpus_type: 'fullwiki' (default, 5M Wikipedia) or 'squad_wiki' (DPR Wikipedia)
+            corpus_type: 'fullwiki' (default, 5M Wikipedia) or 'dpr_wiki' (DPR Wikipedia)
             use_dense: Whether to use dense retrieval (FAISS) if available
         """
         key = (corpus_type, use_dense)
@@ -75,7 +75,7 @@ class GlobalRetriever:
         Loads the pre-built BM25 index and optionally the FAISS dense index.
         
         Args:
-            corpus_type: 'fullwiki' (HotpotQA Wikipedia) or 'squad_wiki' (DPR Wikipedia)
+            corpus_type: 'fullwiki' (HotpotQA Wikipedia) or 'dpr_wiki' (DPR Wikipedia)
             use_dense: Whether to use dense retrieval (FAISS) if available
         """
         self.corpus_type = corpus_type
@@ -86,7 +86,7 @@ class GlobalRetriever:
                 "sparse": "data/meta/retriever_sparse_fullwiki.pkl",
                 "dense": "data/meta/retriever_dense_fullwiki.faiss"
             },
-            "squad_wiki": {
+            "dpr_wiki": {
                 "sparse": "data/meta/retriever_sparse_squad_wiki.pkl",
                 "dense": "data/meta/retriever_dense_squad_wiki.faiss"
             }

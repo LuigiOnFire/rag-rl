@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
-#SBATCH --time=60:00:00
+#SBATCH --time=13:00:00
 #SBATCH --output=logs/%j_oracle_kd_generate.out
 
 # 1. Load the secure .env file
@@ -16,9 +16,9 @@ echo "Starting Oracle KD generation on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
 # Parse dataset name from first positional argument (default: hotpotqa)
-# Usage: sbatch run_oracle_kd_generate.sbatch [hotpotqa|squad] [extra_args...]
+# Usage: sbatch run_oracle_kd_generate.sbatch [hotpotqa|squad|nq] [extra_args...]
 DATASET_NAME="hotpotqa"
-if [[ "$1" == "squad" ]] || [[ "$1" == "hotpotqa" ]]; then
+if [[ "$1" == "squad" ]] || [[ "$1" == "hotpotqa" ]] || [[ "$1" == "nq" ]]; then
     DATASET_NAME="$1"
     shift || true
 fi

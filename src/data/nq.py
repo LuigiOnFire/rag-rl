@@ -8,15 +8,16 @@ from .base import BaseStreamer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SQuADStreamer(BaseStreamer):
+class NQStreamer(BaseStreamer):
     """
-    Streams the SQuAD v1.1 dataset for the GreenRAG Oracle.
-    Note: SQuAD provides only questions and answers, no corpus or supporting facts.
+    Streams the Natural Questions (Open-Domain) dataset for the GreenRAG Oracle.
+    Uses 'nq_open' which aligns with standard DPR/Adaptive-RAG evaluation,
+    providing organic web queries and short answers without massive HTML contexts.
     """
     def __init__(self, setting: str = "fullwiki", split: str = "train", limit: Optional[int] = None):        
         """
         Args:
-            split: 'train' or 'validation' (test not available)
+            split: 'train' or 'validation' 
             limit: If set, only load the first N samples
         """
         self.split = split
@@ -24,8 +25,8 @@ class SQuADStreamer(BaseStreamer):
         self.dataset: Optional[Any] = None
             
         try:
-            logger.info(f"Loading SQuAD split='{split}'...")
-            self.dataset = load_dataset("squad", split=self.split)
+            logger.info(f"Loading NQ Open split='{split}'...")
+            self.dataset = load_dataset("nq_open", split=self.split)
 
             self.total_size: int = len(self.dataset)  # full dataset size before any limit
             
@@ -34,7 +35,7 @@ class SQuADStreamer(BaseStreamer):
                 self.dataset = self.dataset.select(range(min(self.limit, len(self.dataset))))
                 
         except Exception as e:
-            logger.error(f"Failed to load SQuAD: {e}")
+            logger.error(f"Failed to load NQ Open: {e}")
             raise e
 
     def stream(self, shuffle: bool = False) -> Generator[Dict[str, Any], None, None]:
@@ -47,23 +48,27 @@ class SQuADStreamer(BaseStreamer):
         if self.dataset is None:
              raise ValueError("Dataset not initialized.")
         dataset = self.dataset.shuffle() if shuffle else self.dataset
-        for row in dataset:
-            yield self._process_row(row)
+        
+        # Enumerate to inject an ID since nq_open lacks native IDs
+        for i, row in enumerate(dataset):
+            yield self._process_row(i, row)
 
-    def _process_row(self, row: Any) -> Dict:
+    def _process_row(self, index: int, row: Any) -> Dict:
         """
-        Converts HuggingFace SQuAD format to GreenRAG format.
+        Converts HuggingFace nq_open format to GreenRAG format.
         """
-        # SQuAD provides: question, id, answers (list of dicts with 'text' and 'answer_start')
-        answers = row.get("answers", {})
-        answer_texts = answers.get("text", []) if isinstance(answers, dict) else []
+        # nq_open provides: 'question' (str) and 'answer' (list of acceptable strings)
+        answers = row.get("answer", [])
         
         processed = {
-            "id": row.get("id", ""),
+            # nq_open does not have explicit IDs like SQuAD, so we generate a deterministic fallback
+            # This is crucial for your .jsonl checkpointing system!
+            "id": f"nq_{self.split}_{index}",
             "question": row.get("question", ""),
-            "answer": answer_texts[0] if answer_texts else "",
+            # NQ often provides multiple acceptable answers; we take the primary one
+            "answer": answers[0] if answers else "", 
             "gold_titles": [],
-            "corpus": []  # SQuAD has no context corpus
+            "corpus": []  # Like SQuAD, nq_open relies on external retrieval
         }
         
         return processed

@@ -4,7 +4,8 @@ import os
 
 SOURCE_FILES = {
     "hotpotqa": "oracle_kd/data/trajectories/hotpot_qa_trajectories.json",
-    "squad": "oracle_kd/data/trajectories/squad_trajectories.json"
+    "squad": "oracle_kd/data/trajectories/squad_trajectories.json",
+    "nq": "oracle_kd/data/trajectories/nq_trajectories.json"
 }
 MASTER_FILE = "oracle_kd/data/trajectories/master_trajectories.json"
 
@@ -40,8 +41,10 @@ def get_source_file(file_path):
         return "hotpotqa"
     elif "squad" in file_path.lower():
         return "squad"
+    elif "nq" in file_path.lower():
+        return "nq"
     else:
-        raise ValueError("Unable to identify source from filename. Please ensure it contains 'hotpot' or 'squad'.")
+        raise ValueError("Unable to identify source from filename. Please ensure it contains 'hotpot', 'squad', or 'nq'.")
 
 
 def merge_into_source(input_file, source_name):

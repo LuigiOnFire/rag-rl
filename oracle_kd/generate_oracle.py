@@ -184,8 +184,8 @@ def parse_args() -> argparse.Namespace:
         "--dataset-name",
         type=str,
         default="hotpotqa",
-        choices=["hotpotqa", "squad"],
-        help="High-level dataset selector (hotpotqa or squad).",
+        choices=["hotpotqa", "squad", "nq"],
+        help="High-level dataset selector (hotpotqa, squad, or natural questions).",
     )
     parser.add_argument("--limit", type=int, default=11000, help="Samples per dataset.") # Recalculated for about 60 hours but with fullwiki it will be slower
     parser.add_argument("--setting", default="fullwiki", help="Dataset setting.")
@@ -236,11 +236,17 @@ def main() -> None:
     }
 
     # Determine dataset names based on --dataset-name arg
-    if args.dataset_name == "squad":
+# Ensure the streamer loads the correct dataset based on the high-level arg
+    if args.dataset_name == "nq":
+        dataset_names = ["nq"]
+    elif args.dataset_name == "squad":
         dataset_names = ["squad"]
     else:
-        dataset_names = args.datasets
-
+        dataset_names = ["hotpot"]
+        
+    dataset_configs = {
+        name: {"setting": args.setting, "split": args.split} for name in dataset_names
+    }
     print("Using the following datasets: {}".format(", ".join(dataset_names)))
 
     streamer = MixedStreamer(
@@ -290,9 +296,9 @@ def main() -> None:
 
         elif args.setting == "fullwiki":
             # Select retriever corpus based on dataset
-            # SQuAD uses DPR Wikipedia (squad_wiki), others use default Wikipedia (fullwiki)
-            if args.dataset_name == "squad":
-                retriever = GlobalRetriever.get_instance(corpus_type="squad_wiki")
+            # SQuAD and NQ use DPR Wikipedia (squad_wiki), others use default Wikipedia (fullwiki)
+            if args.dataset_name == "squad" or args.dataset_name == "nq":
+                retriever = GlobalRetriever.get_instance(corpus_type="dpr_wiki")
             else:
                 retriever = GlobalRetriever.get_instance(corpus_type="fullwiki")
 
