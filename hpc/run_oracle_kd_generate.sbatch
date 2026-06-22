@@ -6,12 +6,23 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
-#SBATCH --time=13:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=logs/%j_oracle_kd_generate.out
 
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
+# --- JAVA CONFIGURATION (Automatic Container Injection) ---
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+
+export PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+mkdir -p $PYSERINI_CACHE
+
+# We set APPTAINERENV_ so these become JAVA_HOME and PATH inside the container
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+
+export APPTAINERENV_PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
 echo "Starting Oracle KD generation on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
@@ -28,12 +39,17 @@ echo "Dataset: $DATASET_NAME"
 # Build the oracle args as an array so offsets like '--offset 100' survive intact.
 ORACLE_KD_ARGS=(--dataset-name "$DATASET_NAME" --setting fullwiki --execution-mode all_routes --split train)
 
-
 if [[ $# -gt 0 ]]; then
     ORACLE_KD_ARGS+=("$@")
 fi
 
 echo "Using ORACLE_KD_ARGS: ${ORACLE_KD_ARGS[*]}"
+
+# Verify Java existence before submitting to the scheduler
+if [ ! -d "$JAVA_HOME" ]; then
+    echo "ERROR: JAVA_HOME directory does not exist: $JAVA_HOME"
+    exit 1
+fi
 
 # 2. The Container Wrap
 apptainer exec --nv \
@@ -61,4 +77,4 @@ apptainer exec --nv \
             kill $OLLAMA_PID
         ' bash "${ORACLE_KD_ARGS[@]}"
 
-echo "Oracle KD generation complete."
+echo "Oracle KD generation complete." 

@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-SIMPLE_TRAJECTORY_IDS = {0, 1, 2}
-COMPLEX_TRAJECTORY_IDS = {3, 4, 5, 6, 7}
+SIMPLE_TRAJECTORY_IDS = {0, 1, 2, 3}
+COMPLEX_TRAJECTORY_IDS = {4, 5, 6, 7}
 SINGLE_HOP_LOOKUP_IDS = {1, 2}
 
 def _normalize_dataset_name(name: Optional[str]) -> str:

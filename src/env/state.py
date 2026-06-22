@@ -18,6 +18,9 @@ class GreenHistoryItem(TypedDict):
     argument: str       # "What is the capital?"
     observation: str    # "Found 3 docs..."
     cost: float
+    input_state_size: int
+    output_state_size: int
+    duration_seconds: float
 
 class GreenState(TypedDict):
     # 1. High Level

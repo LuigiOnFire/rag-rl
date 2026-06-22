@@ -10,26 +10,30 @@
 
 export $(grep -v '^#' ~/.env | xargs)
 
-CORPUS_TYPE="fullwiki"
+# Java / Pyserini environment variables
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+export APPTAINERENV_PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+
+# Define index paths
+INDEX_DIR="data/indices/fullwiki_index"
+
+# 1. Logic for SQuAD (Prebuilt - nothing to build)
 if [[ "$1" == "squad" ]] || [[ "$1" == "squad_wiki" ]]; then
-    CORPUS_TYPE="squad_wiki"
-elif [[ "$1" == "hotpot" ]] || [[ "$1" == "fullwiki" ]]; then
-    CORPUS_TYPE="fullwiki"
-fi
-
-if [[ "$CORPUS_TYPE" == "squad_wiki" ]]; then
-    OUT_SPARSE="data/meta/retriever_sparse_squad_wiki.pkl"
-else
-    OUT_SPARSE="data/meta/retriever_sparse_fullwiki.pkl"
-fi
-
-if [[ -f "$OUT_SPARSE" ]]; then
-    echo "Skipping sparse index build; $OUT_SPARSE already exists."
+    echo "Using prebuilt index for SQuAD/DPR. Skipping build."
     exit 0
 fi
 
-apptainer exec \
-        --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
-        --env-file ~/.env \
-        pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
-        bash -lc "echo \"Building CPU-based BM25 sparse index for $CORPUS_TYPE...\"; .venv/bin/python -u scripts/01a_build_sparse_index.py --corpus-type $CORPUS_TYPE; echo \"Sparse index successfully saved!\""
+# 2. Logic for Fullwiki (Custom build)
+# Safety check: Look for the Lucene directory, not a .pkl file
+if [ -d "$INDEX_DIR" ] && [ "$(ls -A $INDEX_DIR)" ]; then
+    echo "Sparse index directory $INDEX_DIR already exists and is not empty. Skipping."
+    exit 0
+fi
+
+echo "Building Lucene index for fullwiki..."
+apptainer exec --nv \
+    --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
+    pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
+    bash -lc ".venv/bin/python -u scripts/01a_build_sparse_index.py --corpus-type fullwiki"

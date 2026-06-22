@@ -5,6 +5,8 @@ import uuid
 from typing import Optional, Tuple, Dict, Any
 from codecarbon import EmissionsTracker
 from contextlib import contextmanager
+import time
+
 
 from src.env import state
 import copy
@@ -12,9 +14,8 @@ import json
 import hashlib
 from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
 from src.agent import actions, workers
-from src.env.retriever import EphemeralRetriever
-
-
+from src.env.retriever import EphemeralRetriever, GlobalRetriever
+from typing import Union  # <--- Add this line!
 
 # Get the cost table
 try:
@@ -38,7 +39,7 @@ def _hash_doc(doc: dict) -> str:
 
 # A class to encapsulate the engine logic and manage the state
 class GreenEngine:
-    def __init__(self, retriever: EphemeralRetriever):
+    def __init__(self, retriever: Union[EphemeralRetriever, GlobalRetriever]):
         self.retriever = retriever
 
         hidden_slurm_vars = {}
@@ -121,6 +122,9 @@ class GreenEngine:
         action_name_str = actions.get_action_name(action_id)
 
 
+        start_time = time.perf_counter()
+
+
         with self.track_energy(action_name_str) as metrics:
             # --- [0] or [1]: ANSWERING (GEN_SLM / GEN_LLM) ---
             if action_id in [actions.ACTION_GEN_SLM, actions.ACTION_GEN_LLM]:
@@ -128,7 +132,7 @@ class GreenEngine:
 
                 # Hold on, doesn't this depend on whether or not we have a subquery too? We need to know what to pass here.
                 # This function will figure out what the active query is on its own
-                answer = workers.generate_answer(new_state, use_llm=use_llm)
+                answer, size_metrics = workers.generate_answer(new_state, use_llm=use_llm)
 
                 trace_logger.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
                 trace_logger.debug(f"LLM RESPONDS: {answer}")
@@ -175,10 +179,10 @@ class GreenEngine:
                 # RET_VEC 189.2028 Joules (avg)
                 # Accordingly we use SLM for keyword and LLM for vector to maintain the intuition of "keyword retrieval is cheaper but less powerful, vector retrieval is more expensive but more powerful"
                 if action_id == actions.ACTION_RET_KEY:
-                    argument = workers.generate_query_for_keyword_search(new_state, use_llm=False)
+                    argument, size_metrics = workers.generate_query_for_keyword_search(new_state, use_llm=False)
                     raw_docs = self.retriever.search_bm25(argument)
                 else:
-                    argument = workers.generate_query_for_vector_search(new_state, use_llm=True)
+                    argument, size_metrics = workers.generate_query_for_vector_search(new_state, use_llm=True)
                     raw_docs = self.retriever.search_dense(argument)
 
                 # Update prev_searches in new_state
@@ -212,7 +216,7 @@ class GreenEngine:
                 # Generate either a short-term plan (SLM) or a long-term strategy (LLM)
                 use_llm = (action_id == actions.ACTION_RSN_LLM)
                 # Pass the updated state (with any active-subquery set) to the reasoning worker
-                plan_text = workers.generate_reasoning(new_state, use_llm)
+                plan_text, size_metrics = workers.generate_reasoning(new_state, use_llm)
 
                 # Overwrite strategy if we used LLM, otherwise set the short-term plan
                 if use_llm:
@@ -226,7 +230,7 @@ class GreenEngine:
             # [6] or [7]: DECOMPOSITION (DEC_LLM / DEC_RSN)
             elif action_id in [actions.ACTION_DEC_LLM, actions.ACTION_DEC_RSN]:
                 reasoning_mode = (action_id == actions.ACTION_DEC_RSN)
-                plan_text = workers.generate_plan(state, reasoning_mode)
+                plan_text, size_metrics = workers.generate_plan(state, reasoning_mode)
                 
                 # Format the plan into subqueries
                 # Not sure how well this is going to work but we can iterate
@@ -265,6 +269,12 @@ class GreenEngine:
             else:
                 obs = "Invalid or No-Op Action."
 
+        end_time = time.perf_counter()
+        action_duration = end_time - start_time
+
+        actual_input_size = size_metrics.get("input_size", 0) if 'size_metrics' in locals() else 0
+        actual_output_size = size_metrics.get("output_size", 0) if 'size_metrics' in locals() else 0
+
         # History and Cost Update
         step_cost = metrics['cost']
         new_state['total_joules'] += step_cost
@@ -274,7 +284,10 @@ class GreenEngine:
             action_name=actions.get_action_name(action_id),
             observation=obs,
             argument=argument if argument is not None else "",
-            cost=step_cost
+            cost=step_cost,
+            input_state_size=actual_input_size, 
+            output_state_size=actual_output_size,
+            duration_seconds=action_duration   
         ))
 
         logging.debug(f"Before Step End: New State status: {new_state['status']}, action: {action_id}, observation: {obs}")

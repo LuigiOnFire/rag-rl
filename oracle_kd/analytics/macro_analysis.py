@@ -78,20 +78,38 @@ def run_macro_analysis(records: List[dict]):
     print("SECTION 3.3: TRAJECTORY EFFICIENCY & TRADEOFFS")
     print("==================================================")
     
-    # 1. Oracle Choice Distribution
-    print("1. Oracle Routing Distribution (Optimal Selection Per Dataset):")
+# 1. Oracle Choice Distribution
+    print("1. Oracle Routing Distribution (Complete Workload Breakdown):")
     for d in datasets:
         oracle_counts = Counter()
         for record in dataset_records[d]:
+            # Step 1: Verify if ANY trajectory managed to solve the query
+            has_successful_path = any(
+                bool(attempt.get("is_correct")) 
+                for attempt in record.get("attempts", [])
+            )
+            
+            if not has_successful_path:
+                oracle_counts["Unviable"] += 1
+                continue
+                
+            # Step 2: If solvable, map the oracle's choice to the correct tier
             opt_id = int(record.get("optimal_trajectory_id", -1))
             if opt_id >= 0:
                 tier = "Minimal" if opt_id in SIMPLE_TRAJECTORY_IDS else "Intensive"
                 oracle_counts[tier] += 1
+            else:
+                # Fallback safeguard for edge cases
+                oracle_counts["Unviable"] += 1
+
         total = sum(oracle_counts.values())
         print(f"  - {d.upper()}:")
-        for tier, count in oracle_counts.items():
-            print(f"    * {tier} Tier Selected: {count} ({count/total*100:.1f}%)")
-
+        # Ensure consistent printing order even if counts are 0
+        for tier in ("Minimal", "Intensive", "Unviable"):
+            count = oracle_counts[tier]
+            pct = (count / total * 100) if total else 0.0
+            print(f"    * {tier.ljust(9)} Tier Selected: {count} ({pct:.1f}%)")
+            
     # 2. True Cost of Misrouting
     print("\n2. Cost of Misrouting Penalty (Unnecessary Escalation):")
     for d in ("hotpotqa", "squad", "nq"):

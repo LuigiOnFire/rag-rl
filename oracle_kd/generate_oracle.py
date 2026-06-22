@@ -48,6 +48,8 @@ def strategy_cost(strategy: list, cost_table: Dict[str, float]) -> float:
             total += get_action_cost(cost_table, entry)
     return total
 
+def traj_direct_slm() -> List:
+    return [actions.ACTION_GEN_SLM]
 
 def traj_direct_llm() -> List:
     return [actions.ACTION_GEN_LLM]
@@ -93,6 +95,7 @@ def traj_heavy_decompose_retreive_reason() -> List:
 
 def build_trajectories() -> List[Dict[str, object]]:
     trajectories = [
+        {"name": "direct_slm", "fn": traj_direct_slm},
         {"name": "direct_llm", "fn": traj_direct_llm},
         {"name": "key_then_slm", "fn": traj_key_then_slm},
         {"name": "vec_then_llm", "fn": traj_vec_then_llm},
@@ -236,7 +239,7 @@ def main() -> None:
     }
 
     # Determine dataset names based on --dataset-name arg
-# Ensure the streamer loads the correct dataset based on the high-level arg
+    # Ensure the streamer loads the correct dataset based on the high-level arg
     if args.dataset_name == "nq":
         dataset_names = ["nq"]
     elif args.dataset_name == "squad":
@@ -315,23 +318,28 @@ def main() -> None:
         for traj_idx, traj in enumerate(trajectories):
             start_state = create_initial_state(question)
             strategy = traj["fn"]()
+
+            t0 = time.perf_counter()
             final_state = run_strategy(engine, start_state, strategy)
+            t1 = time.perf_counter()
+            trajectory_duration_sec = t1 - t0
+
             last_state = final_state
 
             final_answer = final_state.get("answer") or ""
             judged_correct, _ = judge.judge(final_answer, ground_truth, question)
             measured_joules = float(final_state.get("total_joules", 0.0))
 
-            attempt_records.append(
-                {
-                    "trajectory_id": traj_idx,
-                    "trajectory_name": traj["name"],
-                    "estimated_cost": float(strategy_cost(strategy, cost_table)),
-                    "measured_joules": measured_joules,
-                    "is_correct": bool(judged_correct),
-                    "status": final_state.get("status", ""),
-                }
-            )
+            attempt_records.append({
+                "trajectory_id": traj_idx,
+                "trajectory_name": traj["name"],
+                "estimated_cost": float(strategy_cost(strategy, cost_table)),
+                "measured_joules": measured_joules,
+                "duration_seconds": trajectory_duration_sec,
+                "is_correct": bool(judged_correct),
+                "status": final_state.get("status", ""),
+                "history": final_state.get("history", []) 
+            })
 
             if judged_correct:
                 if chosen_id is None:
@@ -364,12 +372,13 @@ def main() -> None:
             [
                 {
                     "question": question,
+                    "source": args.dataset_name, 
                     "optimal_trajectory_id": chosen_id,
                     "joules_spent": joules_spent,
                     "is_correct": is_correct,
                     "execution_mode": args.execution_mode,
                     "attempts": attempt_records,
-                    "history": best_correct_state.get("history", []) if is_correct and best_correct_state is not None else [],
+                    # Note: "history" at the root level is removed, as it now lives inside attempt_records
                 }
             ],
         )

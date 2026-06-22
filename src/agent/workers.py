@@ -198,7 +198,16 @@ Main Question: "{question_text}"
 ### ANSWER
 """
     
-    return worker.generate(prompt).strip()
+    input_size = len(prompt.split())
+
+    # Generate the response
+    answer = worker.generate(prompt).strip()
+
+    # [PHASE 1 UPDATE]: Track the exact output size (decoding)
+    output_size = len(answer.split())
+
+    # [PHASE 1 UPDATE]: Return the tuple matching the engine.py unpack logic
+    return answer, {"input_size": input_size, "output_size": output_size}
 
 def generate_query_for_keyword_search(state: GreenState, use_llm: bool = False) -> str:
     """
@@ -254,7 +263,10 @@ Constraint: {constraint_text}
 
 Search Query:
 """
-    return worker.generate(prompt).strip()
+    input_size = len(prompt.split())
+    answer = worker.generate(prompt).strip()
+    output_size = len(answer.split())
+    return answer, {"input_size": input_size, "output_size": output_size}
 
 def generate_query_for_vector_search(state: GreenState, use_llm: bool = False) -> str:
     """
@@ -309,7 +321,14 @@ Constraint: {constraint_text}
 
 Search Query:
 """
-    return worker.generate(prompt).strip()
+    input_size = len(prompt.split())
+
+    # Generate the response
+    answer = worker.generate(prompt).strip()
+
+    output_size = len(answer.split())
+
+    return answer, {"input_size": input_size, "output_size": output_size}
     
 def generate_grade(state: GreenState, doc_text: str, use_llm: bool = False) -> str:
     """
@@ -335,9 +354,12 @@ Document:
 
 Instruction: Reply with EXACTLY one word: "Relevant" or "Irrelevant".
     """
-    
+    input_size = len(prompt.split())
+
     result = worker.generate(prompt).strip().lower()
-    return "Relevant" if "relevant" in result else "Irrelevant"
+
+    output_size = len(result.split())
+    return "Relevant" if "relevant" in result else "Irrelevant", {"input_size": input_size, "output_size": output_size}
 
 def _format_history(history: List[Any]) -> str:
     """Formats the conversation history for the worker context."""
@@ -350,34 +372,39 @@ def _format_history(history: List[Any]) -> str:
     return "\n".join(out)
 
 def generate_rewrite(state: GreenState) -> str:
-        active_sub = get_active_subquery(state)
-        if active_sub is None:
-            return ""
+    active_sub = get_active_subquery(state)
+    if active_sub is None:
+        return ""
 
-        # Gather the answers we already know
-        resolved_context = []
-        for i, sq in enumerate(state.get('subqueries', [])):
-            if sq.get('status') == "ANSWERED" and sq.get('answer'):
-                resolved_context.append(f"- {sq['question']} -> {sq['answer']}")
-        
-        context_str = "\n".join(resolved_context) if resolved_context else "None"
-
-        # Had SQL problems here to so I modified the prompt.
-        prompt = f"""
-    Task: Update the Original Question to be more specific by injecting information from the Known Facts.
-    Do NOT write SQL. Do NOT write code. Write a normal English sentence.    
-    Resolved Queries:
-    {context_str}
-
-    {_brain_context(state, "Rewrite subquery")}
-
-    Target Query to Rewrite: "{active_sub['question']}"
+    # Gather the answers we already know
+    resolved_context = []
+    for i, sq in enumerate(state.get('subqueries', [])):
+        if sq.get('status') == "ANSWERED" and sq.get('answer'):
+            resolved_context.append(f"- {sq['question']} -> {sq['answer']}")
     
-    Constraint: Output ONLY the rewritten query. Do not answer it. If no rewrite is needed, output the original Target Query.
+    context_str = "\n".join(resolved_context) if resolved_context else "None"
+
+    # Had SQL problems here to so I modified the prompt.
+    prompt = f"""
+Task: Update the Original Question to be more specific by injecting information from the Known Facts.
+Do NOT write SQL. Do NOT write code. Write a normal English sentence.    
+Resolved Queries:
+{context_str}
+
+{_brain_context(state, "Rewrite subquery")}
+
+Target Query to Rewrite: "{active_sub['question']}"
+
+Constraint: Output ONLY the rewritten query. Do not answer it. If no rewrite is needed, output the original Target Query.
+
+Rewritten Query:"""
+    input_size = len(prompt.split())
     
-    Rewritten Query:"""
-        
-        return slm_worker.generate(prompt).strip()
+    ans =  slm_worker.generate(prompt).strip()
+
+    output_size = len(ans.split())
+
+    return ans, {"input_size": input_size, "output_size": output_size}
 
 def generate_reasoning(state: GreenState, use_llm: bool = False) -> str:
     """
@@ -447,9 +474,16 @@ def generate_reasoning(state: GreenState, use_llm: bool = False) -> str:
     full_prompt = f"{base_prompt}\n\n{instruction}"
     
     # 5. Call the worker
-    reasoning_text = worker.generate(full_prompt).strip()
+    input_size = len(full_prompt.split())
+
+    # Generate the response
+    answer = worker.generate(full_prompt).strip()
+
+    output_size = len(answer.split())
+
+    # [PHASE 1 UPDATE]: Return the tuple matching the engine.py unpack logic
+    return answer, {"input_size": input_size, "output_size": output_size}
     
-    return reasoning_text
 def generate_plan(state: GreenState, reasoning_mode = False) -> str:
     """
     Action 6/7 (Optional Support): Generates a step-by-step plan if the Director
@@ -501,7 +535,13 @@ def generate_plan(state: GreenState, reasoning_mode = False) -> str:
 
     full_prompt = f"{base_prompt}\n\n{instruction}"
     
-    # 2. Generate
-    plan = worker.generate(full_prompt)
-    
-    return plan
+    input_size = len(full_prompt.split())
+
+    # Generate the response
+    answer = worker.generate(full_prompt).strip()
+
+    # [PHASE 1 UPDATE]: Track the exact output size (decoding)
+    output_size = len(answer.split())
+
+    # [PHASE 1 UPDATE]: Return the tuple matching the engine.py unpack logic
+    return answer, {"input_size": input_size, "output_size": output_size}
