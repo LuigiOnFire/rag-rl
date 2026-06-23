@@ -7,6 +7,7 @@ import re
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any
+import sys
 
 os.environ["OPENAI_API_KEY"] = "sk-not-needed"
 
@@ -100,8 +101,10 @@ class GlobalRetriever:
                     self.documents = pickle.load(f) # FAISS maps to this
                 self.encoder_model = SentenceTransformer('BAAI/bge-base-en-v1.5', device='cuda')
             else:
-                self.use_dense = False
-
+                # Throw a warning message, then halt execution
+                logging.warning(f"Dense index or text file not found for {corpus_type}. Dense search disabled.")
+                sys.exit(1)
+                
     def _extract_title(self, text: str, existing_title: str = None) -> tuple[str, str]:
         """
         Attempts to scrape a title from the text if it's missing or invalid.
