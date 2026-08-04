@@ -39,3 +39,4 @@ ollama
 *.csv
 *.json
 *.yaml
+/.cache

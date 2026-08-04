@@ -1,0 +1,4 @@
+python3 oracle_kd/merge_oracle_training.py data/oracle/oracle_training_data_hotpotqa_20260519_182030.csv 
+python3 oracle_kd/merge_oracle_training.py data/oracle/oracle_training_data_hotpotqa_20260522_170353.csv 
+python3 oracle_kd/merge_oracle_training.py data/oracle/oracle_training_data_squad_20260521_125325.csv 
+python3 oracle_kd/merge_oracle_training.py data/oracle/oracle_training_data_squad_20260522_170358.csv 
