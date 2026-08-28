@@ -23,14 +23,16 @@ Respond ONLY with a valid JSON object:
 """
 
 class ThriftyEarlyExitRouter:
-    def __init__(self, retriever):
-        self.engine = GreenEngine(retriever=retriever)
+    def __init__(self, engine: GreenEngine, slm_client):
+        self.engine = engine
+        self.slm_client = slm_client
 
-    def solve(self, start_state: dict, slm_client) -> dict:
+    def solve(self, start_state: dict) -> dict:
         """
         Executes Route 3 (Dynamic Early Exit) without ground truth access.
         """
         current_state = start_state
+        slm_client = self.slm_client
 
         # Step 1: Execute Light Retrieval (RET_KEY)
         current_state = self.engine.step(current_state, actions.ACTION_RET_KEY)

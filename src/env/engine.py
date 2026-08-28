@@ -81,7 +81,7 @@ class GreenEngine:
             metrics['cost'] = energy_kwh * 3_600_000
     
     
-    def step(self, state: GreenState, action_id: int, argument: Optional[str] = None) -> GreenState:
+    def step(self, state: GreenState, action_id: int, argument: Optional[str] = None, task_type: str = "qa") -> GreenState:
         """
         For our State Machine
         This function constitutes the universal transiation function:
@@ -132,7 +132,7 @@ class GreenEngine:
 
                 # Hold on, doesn't this depend on whether or not we have a subquery too? We need to know what to pass here.
                 # This function will figure out what the active query is on its own
-                answer, size_metrics = workers.generate_answer(new_state, use_llm=use_llm)
+                answer, size_metrics = workers.generate_answer(new_state, use_llm=use_llm, task_type=task_type)
 
                 trace_logger.debug(f"Do we have an active subquery? {'Yes' if get_active_subquery(new_state) is not None else 'No'}")
                 trace_logger.debug(f"LLM RESPONDS: {answer}")

@@ -94,7 +94,7 @@ def configure_worker_logging(log_path: str):
 
 
 # --- CORE SKILLS (Director Delegates These) ---
-def generate_answer(state: GreenState, use_llm: bool = False) -> str:
+def generate_answer(state: GreenState, use_llm: bool = False, task_type="qa") -> str:
     """
     Action 0/1: Synthesize facts into an answer.
     """
@@ -156,16 +156,19 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 
     # 4. Prompt Generation
     # -------------------
-    if is_subquery:
-        # PURE EXTRACTION: For intermediate steps. No comparing facts or forcing "winning entities".
-        prompt = f"""
+    
+    if task_type == "fin":
+        if is_subquery:
+            # Financial Sub-query Extraction (Allows numerical & tabular fact lookups)
+            prompt = f"""
 ### INSTRUCTION
-Extract the exact answer to the Sub-Question from the Context below.
-Output ONLY the specific entity, date, or fact requested. Be brief and concise. Do not write complete sentences.
-If the answer is not in the context, output exactly: "No relevant information found."
+Extract the specific financial figure, value, date, or fact requested in the Sub-Question from the Context below.
+- Check both narrative text and tables.
+- Output ONLY the concise value or entity (e.g., "$3.3 million", "607", "Yes", "No").
+- If the answer is not in the context, output exactly: "No relevant information found."
 
 ### CURRENT TASK
-{_brain_context(state, "Sub-query answer extraction")}
+{_brain_context(state, "Sub-query financial fact extraction")}
 Context:
 {context_str}
 
@@ -173,23 +176,18 @@ Sub-Question: "{question_text}"
 
 ### ANSWER
 """
-    else:
-        # SYNTHESIS & COMPARISON: For the final answer. Strictly forces a winning entity.
-        prompt = f"""
+        else:
+            # Financial Final Synthesis (Supports comparisons, Yes/No, and calculations)
+            prompt = f"""
 ### INSTRUCTION
-Extract the exact answer to the Main User Question from the Context below.
-Output ONLY the entity (name, date, number). Do not write complete sentences. Be robotic and concise.
-Do not list facts. Compare the facts and output ONLY the final winning entity.
-
-### EXAMPLES
-Question: "What is the capital of France?"
-Good Answer: "Paris"
-
-Question: "Who won the 1996 World Series?"
-Good Answer: "New York Yankees"
+You are a financial analyst answering the Main Question based on the financial reports and tables provided.
+- If the question is a Yes/No question, output ONLY 'Yes' or 'No'.
+- If the question asks for a specific metric or number, output the exact value or calculate the difference from the context.
+- When comparing values, evaluate the figures from both the tables and text before making the comparison.
+- Do NOT output extraneous narrative or unrelated entities. Be direct and concise.
 
 ### CURRENT TASK
-{_brain_context(state, "Final answer synthesis")}
+{_brain_context(state, "Final financial answer synthesis")}
 Context:
 {context_str}
 
@@ -197,6 +195,48 @@ Main Question: "{question_text}"
 
 ### ANSWER
 """
+    else:
+        if is_subquery:
+            # PURE EXTRACTION: For intermediate steps. No comparing facts or forcing "winning entities".
+            prompt = f"""
+    ### INSTRUCTION
+    Extract the exact answer to the Sub-Question from the Context below.
+    Output ONLY the specific entity, date, or fact requested. Be brief and concise. Do not write complete sentences.
+    If the answer is not in the context, output exactly: "No relevant information found."
+
+    ### CURRENT TASK
+    {_brain_context(state, "Sub-query answer extraction")}
+    Context:
+    {context_str}
+
+    Sub-Question: "{question_text}"
+
+    ### ANSWER
+    """
+        else:
+            # SYNTHESIS & COMPARISON: For the final answer. Strictly forces a winning entity.
+            prompt = f"""
+    ### INSTRUCTION
+    Extract the exact answer to the Main User Question from the Context below.
+    Output ONLY the entity (name, date, number). Do not write complete sentences. Be robotic and concise.
+    Do not list facts. Compare the facts and output ONLY the final winning entity.
+
+    ### EXAMPLES
+    Question: "What is the capital of France?"
+    Good Answer: "Paris"
+
+    Question: "Who won the 1996 World Series?"
+    Good Answer: "New York Yankees"
+
+    ### CURRENT TASK
+    {_brain_context(state, "Final answer synthesis")}
+    Context:
+    {context_str}
+
+    Main Question: "{question_text}"
+
+    ### ANSWER
+    """
     
     input_size = len(prompt.split())
 

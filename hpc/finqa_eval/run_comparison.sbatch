@@ -12,11 +12,27 @@
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
+# --- JAVA CONFIGURATION (Required for Pyserini/Lucene) ---
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+export PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+mkdir -p $PYSERINI_CACHE
+
+# Inject variables into the Apptainer environment
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+export APPTAINERENV_PYSERINI_CACHE=$PYSERINI_CACHE
+
 echo "Starting FinQA 3-Way Router Comparison on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
 
 # Ensure log directory exists
 mkdir -p logs
+
+# Verify Java existence before submitting to the scheduler
+if [ ! -d "$JAVA_HOME" ]; then
+    echo "ERROR: JAVA_HOME directory does not exist: $JAVA_HOME"
+    exit 1
+fi
 
 # 2. The Container Wrap
 apptainer exec --nv  \

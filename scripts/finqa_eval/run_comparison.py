@@ -15,7 +15,8 @@ from src.oracle.judge import SoftJudge
 from src.routers.static_router import StaticHeuristicRouter
 from src.routers.upfront_router import UpfrontClassifierRouter
 from src.routers.thrifty_router import ThriftyEarlyExitRouter
-
+from src.data.finqa import FinQAStreamer 
+from src.env.state import create_initial_state
 
 class OllamaSLMClient:
     """Connects to the local Ollama daemon running inside the container."""
@@ -89,43 +90,43 @@ def main():
 
     print(f"=== Starting 3-Way Router Comparison ({args.num_samples} samples) ===")
 
-    # 1. Environment Setup
-    dataset = load_finqa_dataset("test")
-    retriever = EphemeralRetriever()
-    engine = GreenEngine(retriever=retriever)
+    # 1. Initialize Streamer & Dependencies
+    streamer = FinQAStreamer(split="test", limit=args.num_samples)
     judge = SoftJudge()
-
     slm_client = MockSLMClient() if args.use_mock else OllamaSLMClient()
 
-    # 2. Router Initialization
-    r1_static = StaticHeuristicRouter(engine)
-    r2_upfront = UpfrontClassifierRouter(engine, slm_client)
-    r3_thrifty = ThriftyEarlyExitRouter(engine, slm_client)
-
-    routers = {
-        "Route 1 (Static Rule)": r1_static,
-        "Route 2 (Upfront SLM)": r2_upfront,
-        "Route 3 (Thrifty Exit)": r3_thrifty
-    }
-
     metrics = {
-        name: {"cost": 0.0, "correct": 0, "light_count": 0, "heavy_count": 0}
-        for name in routers
+        "Route 1 (Static Rule)": {"cost": 0.0, "correct": 0, "light_count": 0, "heavy_count": 0},
+        "Route 2 (Upfront SLM)": {"cost": 0.0, "correct": 0, "light_count": 0, "heavy_count": 0},
+        "Route 3 (Thrifty Exit)": {"cost": 0.0, "correct": 0, "light_count": 0, "heavy_count": 0}
     }
 
-    # 3. Main Evaluation Loop
-    for i in range(min(args.num_samples, len(dataset))):
-        sample = dataset[i]
-        query, context, ground_truth = extract_sample_data(sample)
+    # 2. Main Evaluation Loop
+    for i, sample in enumerate(streamer.stream()):
+        
+        query = sample["question"]
+        ground_truth = sample["answer"]
 
-        base_state = {
-            "question": query,
-            "context": context,
-            "history": [],
-            "status": "SOLVING",
-            "answer": None
+        # IMPORTANT: Initialize Retriever and Engine PER QUESTION using this sample's unique corpus
+        doc_strings = [f"{doc['title']}:\n{doc['text']}" for doc in sample["corpus"]]
+        retriever = EphemeralRetriever(documents=doc_strings)
+
+        engine = GreenEngine(retriever=retriever)
+
+        # Initialize the routers tied to this specific engine instance
+        r1_static = StaticHeuristicRouter(engine)
+        r2_upfront = UpfrontClassifierRouter(engine, slm_client)
+        r3_thrifty = ThriftyEarlyExitRouter(engine, slm_client)
+
+        routers = {
+            "Route 1 (Static Rule)": r1_static,
+            "Route 2 (Upfront SLM)": r2_upfront,
+            "Route 3 (Thrifty Exit)": r3_thrifty
         }
 
+        base_state = create_initial_state(query)
+        base_state["context"] = sample["raw_context"]
+        
         print(f"\n--- Sample #{i+1} ---")
         print(f"Query: {query[:100]}...")
 
@@ -140,7 +141,7 @@ def main():
             cost = compute_trajectory_cost(final_state.get("history", []))
             answer = final_state.get("answer", "")
             
-            # Judge correctness if answer was generated
+            # Judge correctness
             is_correct = False
             if answer:
                 is_correct, _ = judge.judge(answer, ground_truth, query)
@@ -148,7 +149,7 @@ def main():
             # Record metrics
             metrics[name]["cost"] += cost
             if is_correct:
-                metrics[name]["correct"] += i
+                metrics[name]["correct"] += 1
             
             # Track trajectory depth/actions
             action_ids = [step["action_id"] for step in final_state.get("history", [])]
@@ -166,14 +167,16 @@ def main():
     print(f"{'Router Strategy':<25} | {'Total Cost (J)':<15} | {'Accuracy':<10} | {'Light/Heavy Traj':<15}")
     print("-" * 72)
 
-    total_eval = min(args.num_samples, len(dataset))
+    # Calculate total evaluated based on the loop counter 'i'
+    # (Fallback to 0 if the loop somehow never ran)
+    total_eval = i + 1 if 'i' in locals() else 0
+
     for name, m in metrics.items():
         acc = (m["correct"] / total_eval) * 100 if total_eval > 0 else 0.0
         traj_str = f"{m['light_count']}L / {m['heavy_count']}H"
         print(f"{name:<25} | {m['cost']:<15.2f} | {acc:<9.1f}% | {traj_str:<15}")
 
     print("="*60)
-
 
 if __name__ == "__main__":
     main()
