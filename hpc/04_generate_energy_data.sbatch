@@ -1,0 +1,80 @@
+#!/bin/bash
+#SBATCH --job-name=04_generate_energy_data
+#SBATCH --nodes=1
+#SBATCH --partition=l40s
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
+#SBATCH --gres=gpu:1
+#SBATCH --time=72:00:00
+#SBATCH --output=logs/%j_generate_energy_data.out
+
+# 1. Load the secure .env file
+export $(grep -v '^#' ~/.env | xargs)
+
+# --- JAVA CONFIGURATION (Automatic Container Injection) ---
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+
+export PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+mkdir -p $PYSERINI_CACHE
+
+# We set APPTAINERENV_ so these become JAVA_HOME and PATH inside the container
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+
+export APPTAINERENV_PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+echo "Starting energy-data generation on $HOSTNAME"
+export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+
+# Parse dataset name from first positional argument (default: hotpotqa)
+# Usage: sbatch hpc/04_generate_energy_data.sbatch [hotpotqa|squad|nq] [extra_args...]
+DATASET_NAME="hotpotqa"
+if [[ "$1" == "squad" ]] || [[ "$1" == "hotpotqa" ]] || [[ "$1" == "nq" ]]; then
+    DATASET_NAME="$1"
+    shift || true
+fi
+
+echo "Dataset: $DATASET_NAME"
+
+# Build the generation args as an array so offsets like '--offset 100' survive intact.
+GENERATION_ARGS=(--dataset-name "$DATASET_NAME" --setting fullwiki --execution-mode all_routes --split train)
+
+if [[ $# -gt 0 ]]; then
+    GENERATION_ARGS+=("$@")
+fi
+
+echo "Using GENERATION_ARGS: ${GENERATION_ARGS[*]}"
+
+# Verify Java existence before submitting to the scheduler
+if [ ! -d "$JAVA_HOME" ]; then
+    echo "ERROR: JAVA_HOME directory does not exist: $JAVA_HOME"
+    exit 1
+fi
+
+# 2. The Container Wrap
+apptainer exec --nv \
+        --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
+        --env-file ~/.env \
+        pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
+        bash -c '
+            echo "Starting Ollama inside container..."
+            echo "Container GENERATION_ARGS: $*"
+            export OLLAMA_MODELS="./ollama_models"
+            ./bin/ollama serve > logs/ollama_energy_data.log 2>&1 &
+            OLLAMA_PID=$!
+
+            # Wait for the server to wake up
+            sleep 15
+
+            # Ensure models are ready (skip if already pulled, but safe to leave)
+            ./bin/ollama pull $LLM_MODEL
+            ./bin/ollama pull $SLM_MODEL
+
+            echo "Running energy-data generator..."
+            .venv/bin/python -u scripts/04_generate_energy_data.py "$@"
+
+            echo "Cleaning up..."
+            kill $OLLAMA_PID
+        ' bash "${GENERATION_ARGS[@]}"
+
+echo "Energy-data generation complete."

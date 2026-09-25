@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+.env
+.env.*
+build/
+dist/
+downloads/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code
+.vscode/
+
+# Project Specific
+# Generated artifacts and local experiment outputs
+/data/*
+models/
+old_models/
+old_data/
+wandb/
+logs/
+ollama
+/ollama_models/
+
+# Slurm stuff
+*.out
+*.sif
+
+# Swapfiles
+*.swp
+
+# Data
+*.csv
+*.json
+*.yaml
+/.cache
+
+# Published energy data
+!/data/energy_data/
+/data/energy_data/*
+!/data/energy_data/training/
+!/data/energy_data/training/*.csv
+!/data/energy_data/trajectories/
+!/data/energy_data/trajectories/*.json
