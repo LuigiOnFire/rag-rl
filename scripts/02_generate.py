@@ -19,8 +19,14 @@ FORCE_DECOMP_RATE = 1
 
 def main():
     # Initialize Logging
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s\n%(message)s')
-    logging.getLogger().setLevel(logging.DEBUG)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        force=True  # Overwrites whatever imported module initialized the logger first
+    )
+
+    # Explicitly ensure fsspec stays quiet
+    logging.getLogger("fsspec").setLevel(logging.WARNING)
     print("Starting Oracle Generation...")
 
     # Create Run Directory

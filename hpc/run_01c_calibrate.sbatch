@@ -6,13 +6,19 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1              
-#SBATCH --output=logs/01_calibrate_%j.out 
+#SBATCH --output=logs/%j_01_calibrate.out 
 
 # 1. Load the secure .env file from your HOME directory vault
 export $(grep -v '^#' ~/.env | xargs)
 
 echo "Starting Calibration on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+# We set APPTAINERENV_ so these become JAVA_HOME and PATH inside the container
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+
 
 # 2. Run Python Script via Apptainer (Notice the --nv flag and new .sif image!)
 apptainer exec --nv  \

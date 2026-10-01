@@ -64,22 +64,44 @@ class GlobalRetriever:
     """
     Simulates a massive vector DB by loading a pre-built index consisting of a 
     large corpus of documents (e.g. all original Wikipedia abstracts).
-    Supports multiple corpus types: 'fullwiki' and 'dpr_wiki'.
+    Supports multiple corpus types ('fullwiki', 'dpr_wiki', 'squad_wiki') 
+    and index topologies ('hnsw', 'ivf', 'flat').
     """
-    _instances = {}  # Cache instances per corpus type
-    
+    _instances = {}
+
     @classmethod
-    def get_instance(cls, corpus_type: str = "fullwiki", use_dense: bool = True):
-        key = (corpus_type, use_dense)
+    def get_instance(
+        cls, 
+        corpus_type: str = "fullwiki", 
+        use_dense: bool = True, 
+        index_type: str = "hnsw",
+        ef_search: int = 64,
+        nprobe: int = 64
+    ):
+        key = (corpus_type, use_dense, index_type)
         if key not in cls._instances:
-            cls._instances[key] = cls(corpus_type=corpus_type, use_dense=use_dense)
+            cls._instances[key] = cls(
+                corpus_type=corpus_type, 
+                use_dense=use_dense, 
+                index_type=index_type,
+                ef_search=ef_search,
+                nprobe=nprobe
+            )
         return cls._instances[key]
 
-    def __init__(self, corpus_type: str = "fullwiki", use_dense: bool = True):
+    def __init__(
+        self, 
+        corpus_type: str = "fullwiki", 
+        use_dense: bool = True, 
+        index_type: str = "hnsw",
+        ef_search: int = 64,
+        nprobe: int = 64
+    ):
         self.corpus_type = corpus_type
+        self.index_type = index_type
         
         # --- 1. PYSERINI SPARSE INITIALIZATION ---
-        if corpus_type == "dpr_wiki":
+        if corpus_type in ["dpr_wiki", "squad_wiki"]:
             self.bm25_searcher = LuceneSearcher.from_prebuilt_index('wikipedia-dpr')
         elif corpus_type == "fullwiki":
             self.bm25_searcher = LuceneSearcher("data/indices/fullwiki_index")
@@ -88,21 +110,39 @@ class GlobalRetriever:
         self.use_dense = use_dense
         self.faiss_index = None
         self.encoder_model = None
-        self.documents = None  # This is your critical lookup table
+        self.documents = None
 
         if self.use_dense:
-            dense_path = f"data/meta/retriever_dense_{corpus_type}.faiss"
-            text_path = f"data/meta/{corpus_type}_corpus.pkl" # Load the raw text list
+            # Check for topology-specific index first, then fall back to flat
+            candidate_path = f"data/meta/retriever_dense_{corpus_type}_{index_type}.faiss"
+            flat_fallback = f"data/meta/retriever_dense_{corpus_type}.faiss"
             
+            if os.path.exists(candidate_path):
+                dense_path = candidate_path
+            elif os.path.exists(flat_fallback):
+                logging.warning(f"{candidate_path} not found. Falling back to {flat_fallback}")
+                dense_path = flat_fallback
+            else:
+                dense_path = candidate_path
+
+            text_path = f"data/meta/{corpus_type}_corpus.pkl"
+
             if os.path.exists(dense_path) and os.path.exists(text_path):
                 import faiss
+                logging.info(f"Loading FAISS index from {dense_path}...")
                 self.faiss_index = faiss.read_index(dense_path)
+                
+                # Configure ANN search depth based on loaded topology
+                if hasattr(self.faiss_index, "hnsw"):
+                    self.faiss_index.hnsw.efSearch = ef_search
+                elif hasattr(self.faiss_index, "nprobe"):
+                    self.faiss_index.nprobe = nprobe
+                
                 with open(text_path, "rb") as f:
-                    self.documents = pickle.load(f) # FAISS maps to this
+                    self.documents = pickle.load(f)
                 self.encoder_model = SentenceTransformer('BAAI/bge-base-en-v1.5', device='cuda')
             else:
-                # Throw a warning message, then halt execution
-                logging.warning(f"Dense index or text file not found for {corpus_type}. Dense search disabled.")
+                logging.warning(f"Dense index ({dense_path}) or text file ({text_path}) missing. Dense search disabled.")
                 sys.exit(1)
                 
     def _extract_title(self, text: str, existing_title: str = None) -> tuple[str, str]:

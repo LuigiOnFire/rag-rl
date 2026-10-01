@@ -9,7 +9,7 @@ from src.env.retriever import EphemeralRetriever
 from src.oracle.judge import SoftJudge
 from src.env.engine import GreenEngine
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 trace_logger = logging.getLogger("LLM_TRACE")
 trace_logger.addHandler(logging.NullHandler())
@@ -397,132 +397,107 @@ class WaterfallOracle(OracleInterface):
             
         return sft_trajectory
     
+        # STRATEGIES = [
+        #     # --- TIER 0: Parametric Zero-Shot ---
+        #     [actions.ACTION_GEN_SLM],                                   # ~348 J
+        #     [actions.ACTION_GEN_LLM],                                   # ~641 J
+
+        #     # --- TIER 1: Lexical Single-Hop ---
+        #     [actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM],           # ~690 J
+        #     [actions.ACTION_RET_KEY, actions.ACTION_GEN_LLM],           # ~983 J
+        #     [actions.ACTION_RSN_SLM, actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM],  # ~1,124 J (Moved up)
+
+        #     # --- TIER 2: Dense Single-Hop ---
+        #     [actions.ACTION_RET_VEC, actions.ACTION_GEN_SLM],           # ~1,669 J
+        #     [actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM],           # ~1,962 J
+        #     [actions.ACTION_RSN_SLM, actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM],  # ~2,396 J
+        #     [actions.ACTION_RSN_LLM, actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM],  # ~2,760 J
+
+        #     # --- TIER 3: Interleaved Multi-Hop ---
+        #     [
+        #         actions.ACTION_RET_KEY,
+        #         actions.ACTION_RSN_LLM,
+        #         actions.ACTION_RET_VEC,
+        #         actions.ACTION_RSN_SLM,
+        #         actions.ACTION_GEN_LLM,
+        #     ],                                                          # ~3,540 J
+
+        #     # --- TIER 4: Recursive Decomposition (Your Benchmark Winners) ---
+        #     # Standard LLM Decomposition (Achieved 63.33%)
+        #     [
+        #         actions.ACTION_DEC_LLM,
+        #         (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
+        #         actions.ACTION_GEN_LLM,
+        #     ],                                                          # ~9,185 J
+
+        #     # Heavy Joint-Reasoning Decomposition (Achieved 64.44%)
+        #     [
+        #         actions.ACTION_DEC_RSN,
+        #         (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
+        #         actions.ACTION_GEN_LLM,
+        #     ],                                                          # ~9,586 J
+        # ]
+
     STRATEGIES = [
-        # Strategy 1.1: Try to solve directly with SLM generation
+        # -------------------------------------------------------------------------
+        # Route 0: Direct SLM (~348 J)
+        # Covers: ACTION_GEN_SLM (0)
+        # -------------------------------------------------------------------------
         [actions.ACTION_GEN_SLM],
 
-        # Strategy 1.2: Same but with LLM generation
+        # -------------------------------------------------------------------------
+        # Route 1: Direct LLM (~641 J)
+        # Covers: ACTION_GEN_LLM (1)
+        # -------------------------------------------------------------------------
         [actions.ACTION_GEN_LLM],
 
-        # Strategy 2.1: Key search, then generate with SLM
+        # -------------------------------------------------------------------------
+        # Route 2: Keyword -> SLM (~690 J)
+        # Covers: ACTION_RET_KEY (2)
+        # -------------------------------------------------------------------------
         [
             actions.ACTION_RET_KEY, 
             actions.ACTION_GEN_SLM
         ],
 
-        # Strategy 2.2: Key search, then generate with LLM
-        [
-            actions.ACTION_RET_KEY, 
-            actions.ACTION_GEN_LLM
-        ],
-
-        # Strategy 2.3 Vector search, then generate with SLM
-        [
-            actions.ACTION_RET_VEC, 
-            actions.ACTION_GEN_SLM
-        ],
-
-        # Strategy 2.4 Vector search, then generate with LLM
+        # -------------------------------------------------------------------------
+        # Route 3: Vector Search -> LLM (~1,962 J)
+        # Covers: ACTION_RET_VEC (3)
+        # -------------------------------------------------------------------------
         [
             actions.ACTION_RET_VEC, 
             actions.ACTION_GEN_LLM
         ],
 
-        # Strategy 3.1: Decompose, then generate with SLM
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_GEN_SLM,),  # repeat until no active subquery
-            actions.ACTION_GEN_SLM,     # final synthesis answer
-        ],
-
-        # Strategy 3.2: Decompose, then generate with LLM
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_GEN_LLM,),  # repeat until no active subquery
-            actions.ACTION_GEN_LLM,     # final synthesis answer
-        ],
-
-        # Strategy 4.1: Decompose, then retrieve with keyword and generate with SLM for each subproblem
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM),  # repeat until no active subquery
-            actions.ACTION_GEN_SLM,     # final synthesis answer
-        ],
-
-        # Strategy 4.2: Decompose, then retrieve with keyword and generate with LLM for each subproblem
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_KEY, actions.ACTION_GEN_LLM),  # repeat until no active subquery
-            actions.ACTION_GEN_LLM,     # final synthesis answer
-        ],
-
-        # Strategy 4.3: Decompose, then retrieve with vector and generate with SLM for each subproblem
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_VEC, actions.ACTION_GEN_SLM),  # repeat until no active subquery
-            actions.ACTION_GEN_SLM,     # final synthesis answer
-        ],
-
-        # Strategy 4.4: Decompose, then retrieve with vector and generate with LLM for each subproblem
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM),  # repeat until no active subquery
-            actions.ACTION_GEN_LLM,     # final synthesis answer
-        ],
-        # Strategy 5.1: Reason, then key search, then generate (SLM)
+        # -------------------------------------------------------------------------
+        # Route 4: SLM Reason -> Vector Search -> LLM (~2,396 J)
+        # Covers: ACTION_RSN_SLM (4)
+        # -------------------------------------------------------------------------
         [
             actions.ACTION_RSN_SLM,
-            actions.ACTION_RET_KEY,
-            actions.ACTION_GEN_SLM,
+            actions.ACTION_RET_VEC, 
+            actions.ACTION_GEN_LLM
         ],
 
-        # Strategy 5.2: Reason, then vector search, then generate (LLM)
+        # -------------------------------------------------------------------------
+        # Route 5: Decompose -> Sub-retrieval w/ LLM Reason & Sub-Answer (~9,185 J)
+        # Covers: ACTION_DEC_LLM (6) and ACTION_RSN_LLM (5)
+        # -------------------------------------------------------------------------
         [
-            actions.ACTION_RSN_LLM,
-            actions.ACTION_RET_VEC,
+            actions.ACTION_DEC_LLM,
+            (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
             actions.ACTION_GEN_LLM,
         ],
-        # Strategy 6.1: Decompose, retrieve, reason, answer for each subtask
-        [
-            actions.ACTION_DEC_RSN,
-            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_SLM,
-        ],
 
-        # Strategy 6.2: Decompose, retrieve, reason, answer for each subtask
+        # -------------------------------------------------------------------------
+        # Route 6: Heavy Joint Reason & Decompose -> Full Loop (~9,586 J)
+        # Covers: ACTION_DEC_RSN (7)
+        # -------------------------------------------------------------------------
         [
             actions.ACTION_DEC_RSN,
             (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
             actions.ACTION_GEN_LLM,
         ],
-        # Strategy 7.1: Decompose, then for each subtask: retrieve -> reason -> answer
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_LLM,
-        ],
-        
-        # Strategy 7.2: Same as 7.1 but using vector search and LLM reasoning
-        [
-            actions.ACTION_DEC_LLM,
-            (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_LLM,
-        ],
-        # Strategy 8.1: Search -> Reason -> Search -> Reason -> Answer
-        [
-            actions.ACTION_RET_KEY,
-            actions.ACTION_RSN_SLM,
-            actions.ACTION_RET_VEC,     # Try a different search method
-            actions.ACTION_RSN_SLM,
-            actions.ACTION_GEN_LLM,
-        ],
-        # Strategy 9.1: Form Long-Term Strategy, then Decompose, then execute
-        [
-            actions.ACTION_RSN_LLM,    # Populates [STRATEGY]
-            actions.ACTION_DEC_LLM,    # Decomposes based on the strategy
-            (actions.ACTION_RET_KEY, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
-            actions.ACTION_GEN_LLM,
-        ]
     ]
 
 

@@ -35,7 +35,6 @@ def get_action_cost(cost_table: Dict[str, float], action_id: int) -> float:
     return float(cost_table.get(str(action_id), 1.0))
 
 
-# Keep this aligned with the calibrator assumption used elsewhere.
 AVG_DECOMPOSE_SUBQUERIES = 3
 
 
@@ -48,75 +47,74 @@ def strategy_cost(strategy: list, cost_table: Dict[str, float]) -> float:
             total += get_action_cost(cost_table, entry)
     return total
 
+
+# =========================================================================
+# 7-Route Minimal Representative Trajectories
+# =========================================================================
+
+# Route 0: Direct SLM
 def traj_direct_slm() -> List:
     return [actions.ACTION_GEN_SLM]
 
+# Route 1: Direct LLM
 def traj_direct_llm() -> List:
     return [actions.ACTION_GEN_LLM]
 
+# Route 2: Keyword -> SLM
 def traj_key_then_slm() -> List:
     return [actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM]
 
+# Route 3: Vector Search -> LLM
 def traj_vec_then_llm() -> List:
     return [actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM]
 
+# Route 4: SLM Reason -> Vector Search -> LLM
 def traj_reason_vec_llm() -> List:
     return [actions.ACTION_RSN_SLM, actions.ACTION_RET_VEC, actions.ACTION_GEN_LLM]
 
-def traj_search_reason_iterate() -> List:
+# Route 5: Decompose -> Sub-retrieval w/ LLM Reason & Sub-Answer
+def traj_decompose_retrieve_reason() -> List:
     return [
-        actions.ACTION_RET_KEY,
-        actions.ACTION_RSN_SLM,
-        actions.ACTION_RET_VEC,     
-        actions.ACTION_RSN_SLM,
+        actions.ACTION_DEC_LLM,
+        (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
         actions.ACTION_GEN_LLM,
     ]
 
-def traj_decompose_key_slm() -> List:
-    return [
-        actions.ACTION_DEC_LLM,
-        (actions.ACTION_RET_KEY, actions.ACTION_GEN_SLM),
-        actions.ACTION_GEN_SLM,
-    ]
-
-def traj_decompose_retreive_reason() -> List:
-    return [
-        actions.ACTION_DEC_LLM,
-        (actions.ACTION_RET_VEC, actions.ACTION_RSN_SLM, actions.ACTION_GEN_SLM),
-        actions.ACTION_GEN_LLM,
-    ]
-
-def traj_heavy_decompose_retreive_reason() -> List:
+# Route 6: Heavy Joint Reason & Decompose -> Full Loop
+def traj_heavy_decompose_retrieve_reason() -> List:
     return [
         actions.ACTION_DEC_RSN,
-        (actions.ACTION_RET_VEC, actions.ACTION_RSN_SLM, actions.ACTION_GEN_LLM),
+        (actions.ACTION_RET_VEC, actions.ACTION_RSN_LLM, actions.ACTION_GEN_LLM),
         actions.ACTION_GEN_LLM,
     ]
 
-def build_trajectories() -> List[Dict[str, object]]:
+
+def build_trajectories(cost_table: Dict[str, float], auto_sort: bool = True) -> List[Dict[str, object]]:
     trajectories = [
         {"name": "direct_slm", "fn": traj_direct_slm},
         {"name": "direct_llm", "fn": traj_direct_llm},
         {"name": "key_then_slm", "fn": traj_key_then_slm},
         {"name": "vec_then_llm", "fn": traj_vec_then_llm},
         {"name": "reason_vec_llm", "fn": traj_reason_vec_llm},
-        {"name": "search_reason_iterate", "fn": traj_search_reason_iterate},
-        {"name": "decompose_key_slm", "fn": traj_decompose_key_slm},        
-        {"name": "decompose_retreive_reason", "fn": traj_decompose_retreive_reason},
-        {"name": "heavy_decompose_retreive_reason", "fn": traj_heavy_decompose_retreive_reason}
+        {"name": "decompose_retrieve_reason", "fn": traj_decompose_retrieve_reason},
+        {"name": "heavy_decompose_retrieve_reason", "fn": traj_heavy_decompose_retrieve_reason},
     ]
 
-    cost_table = load_cost_table()
-    costs = [strategy_cost(t["fn"](), cost_table) for t in trajectories]
-    for i in range(len(costs) - 1):
-        if costs[i] > costs[i + 1]:
-
-            raise AssertionError(
-                "Trajectory list is not cost-ordered. "
-                f"{trajectories[i]['name']} ({costs[i]:.4f}) > "
-                f"{trajectories[i + 1]['name']} ({costs[i + 1]:.4f})."
-                f"Order should be: {[t['name'] + ': ' + str(strategy_cost(t['fn'](), cost_table)) for t in sorted(trajectories, key=lambda x: strategy_cost(x['fn'](), cost_table))]}"
-            )
+    if auto_sort:
+        # Dynamically sort strictly by strategy cost to prevent cost-inversion bugs
+        trajectories = sorted(trajectories, key=lambda t: strategy_cost(t["fn"](), cost_table))
+        logging.info("Trajectories sorted by strategy cost:")
+        for idx, t in enumerate(trajectories):
+            logging.info("  [%d] %-32s : %.2f J", idx, t["name"], strategy_cost(t["fn"](), cost_table))
+    else:
+        # Hard assertion check
+        costs = [strategy_cost(t["fn"](), cost_table) for t in trajectories]
+        for i in range(len(costs) - 1):
+            if costs[i] > costs[i + 1]:
+                raise AssertionError(
+                    f"Trajectory list is not cost-ordered: {trajectories[i]['name']} ({costs[i]:.2f} J) > "
+                    f"{trajectories[i+1]['name']} ({costs[i+1]:.2f} J). Pass --auto-sort-trajectories to fix."
+                )
 
     return trajectories
 
@@ -127,8 +125,8 @@ def run_strategy(engine: GreenEngine, start_state: GreenState, strategy: List) -
     for entry in strategy:
         if isinstance(entry, tuple):
             repeat_actions = entry
-            loop_safety_counter = 0  
-            while get_active_subquery(current_state) is not None and loop_safety_counter < 20:  # Safety to prevent infinite loops
+            loop_safety_counter = 0
+            while get_active_subquery(current_state) is not None and loop_safety_counter < 20:
                 for sub_action in repeat_actions:
                     current_state = engine.step(current_state, sub_action, argument=None)
                     if current_state["status"] in ("SOLVED", "FAILED"):
@@ -190,31 +188,49 @@ def parse_args() -> argparse.Namespace:
         choices=["hotpotqa", "squad", "nq"],
         help="High-level dataset selector (hotpotqa, squad, or natural questions).",
     )
-    parser.add_argument("--limit", type=int, default=11000, help="Samples per dataset.") # Recalculated for about 60 hours but with fullwiki it will be slower
+    parser.add_argument(
+        "--index-type",
+        type=str,
+        default="hnsw",
+        choices=["hnsw", "ivf", "flat"],
+        help="FAISS dense index topology to load.",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Smoke test sample limit.")
     parser.add_argument("--setting", default="fullwiki", help="Dataset setting.")
     parser.add_argument("--split", default="train", help="Dataset split.")
     parser.add_argument("--output", default="data/oracle/oracle_training_data.csv")
     parser.add_argument("--history-output", default="data/oracle/oracle_trajectory_history.jsonl")
-    parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--offset", type=int, default=0, help="Number of samples to skip before starting.")
     parser.add_argument(
         "--execution-mode",
         type=str,
-        default="first_success",
+        default="all_routes",
         choices=["first_success", "all_routes"],
         help="Route execution mode: stop at first correct route or run all routes and log each attempt.",
+    )
+    parser.add_argument(
+        "--auto-sort-trajectories",
+        action="store_true",
+        default=True,
+        help="Sort candidate trajectories strictly by cost using cost_table.json to prevent inversions.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    # Silence verbose HTTP debug logs from downstream clients.
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # 1. Force root logger to INFO and suppress noisy third-party loggers
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        force=True
+    )
+    for noisy in ["fsspec", "urllib3", "filelock", "datasets", "transformers", "httpcore", "httpx"]:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     args = parse_args()
+    
     default_output = "data/oracle/oracle_training_data.csv"
     if args.output == default_output:
         run_id = time.strftime("%Y%m%d_%H%M%S")
@@ -230,16 +246,11 @@ def main() -> None:
     os.makedirs(trace_dir, exist_ok=True)
     logging.info("Worker trace logs will be written to %s", trace_dir)
 
-    trajectories = build_trajectories()
     cost_table = load_cost_table()
+    trajectories = build_trajectories(cost_table, auto_sort=args.auto_sort_trajectories)
     judge = SoftJudge()
 
-    dataset_configs = {
-        name: {"setting": args.setting, "split": args.split} for name in args.datasets
-    }
-
-    # Determine dataset names based on --dataset-name arg
-    # Ensure the streamer loads the correct dataset based on the high-level arg
+    # Map dataset selection
     if args.dataset_name == "nq":
         dataset_names = ["nq"]
     elif args.dataset_name == "squad":
@@ -250,7 +261,7 @@ def main() -> None:
     dataset_configs = {
         name: {"setting": args.setting, "split": args.split} for name in dataset_names
     }
-    print("Using the following datasets: {}".format(", ".join(dataset_names)))
+    logging.info("Using datasets: %s", ", ".join(dataset_names))
 
     streamer = MixedStreamer(
         dataset_names=dataset_names,
@@ -269,18 +280,15 @@ def main() -> None:
 
     init_csv(args.output)
 
-    total = streamer.n_limit
-    processed_count = 0  # how many we've actually done, which may be less than idx due to offset and skips
+    processed_count = 0
     for idx, sample in enumerate(streamer.stream()):
-        # skip for offset
         if idx < args.offset:
             if (idx + 1) % 1000 == 0:
-                logging.info(f"Skipping offset rows... ({idx + 1}/{args.offset})")
+                logging.info("Skipping offset rows... (%d/%d)", idx + 1, args.offset)
             continue
 
-        # stop for the limit 
         if processed_count >= args.limit:
-            logging.info(f"Reached limit of {args.limit} generated samples. Stopping.")
+            logging.info("Reached limit of %d generated samples. Stopping.", args.limit)
             break
 
         question = sample["question"]
@@ -294,16 +302,14 @@ def main() -> None:
             if not corpus:
                 logging.warning("Skipping sample with empty distractor corpus: %s", question)
                 continue
-            # Build a tiny 10-paragraph retriever
             retriever = EphemeralRetriever(documents=corpus)
 
         elif args.setting == "fullwiki":
-            # Select retriever corpus based on dataset
-            # SQuAD and NQ use DPR Wikipedia (squad_wiki), others use default Wikipedia (fullwiki)
-            if args.dataset_name == "squad" or args.dataset_name == "nq":
-                retriever = GlobalRetriever.get_instance(corpus_type="dpr_wiki")
-            else:
-                retriever = GlobalRetriever.get_instance(corpus_type="fullwiki")
+            corpus_type = "dpr_wiki" if args.dataset_name in ("squad", "nq") else "fullwiki"
+            retriever = GlobalRetriever.get_instance(
+                corpus_type=corpus_type,
+                index_type=args.index_type
+            )
 
         engine = GreenEngine(retriever=retriever)
 
@@ -311,10 +317,9 @@ def main() -> None:
         joules_spent = 0.0
         is_correct = False
         last_state = None
-        best_correct_state = None
         attempt_records = []
 
-        # THIS IS THE MAIN LOOP
+        # MAIN CASCADING SEARCH LOOP
         for traj_idx, traj in enumerate(trajectories):
             start_state = create_initial_state(question)
             strategy = traj["fn"]()
@@ -345,7 +350,6 @@ def main() -> None:
                 if chosen_id is None:
                     chosen_id = traj_idx
                     joules_spent = measured_joules
-                    best_correct_state = final_state
                     is_correct = True
 
                 if args.execution_mode == "first_success":
@@ -378,16 +382,22 @@ def main() -> None:
                     "is_correct": is_correct,
                     "execution_mode": args.execution_mode,
                     "attempts": attempt_records,
-                    # Note: "history" at the root level is removed, as it now lives inside attempt_records
                 }
             ],
         )
 
         processed_count += 1
-        if processed_count % 10 == 0:
-            logging.info("Processed %s/%s", processed_count, args.limit)
+        logging.info(
+            "[%d/%d] Q: %s... -> Winner: %s (Correct: %s, Joules: %.1f J)",
+            processed_count,
+            args.limit,
+            question[:50],
+            trajectories[chosen_id]["name"],
+            is_correct,
+            joules_spent
+        )
 
-    logging.info("Done. Output saved to %s", args.output)
+    logging.info("Smoke test complete! Data written to %s", args.output)
 
 
 if __name__ == "__main__":

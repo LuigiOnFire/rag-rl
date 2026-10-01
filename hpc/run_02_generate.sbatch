@@ -7,13 +7,18 @@
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
 #SBATCH --time=12:00:00            # Kept your 12-hour limit!
-#SBATCH --output=logs/02_trajectory_%j.out 
+#SBATCH --output=logs/%j_02_gen_traj.out 
 
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
 echo "Starting Trajectory Generation on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+# We set APPTAINERENV_ so these become JAVA_HOME and PATH inside the container
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
 
 # 2. The Container Wrap
 apptainer exec --nv  \

@@ -3,9 +3,14 @@ import json
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-SIMPLE_TRAJECTORY_IDS = {0, 1, 2, 3}
-COMPLEX_TRAJECTORY_IDS = {4, 5, 6, 7}
-SINGLE_HOP_LOOKUP_IDS = {1, 2}
+# Pure Parametric (Zero Retrieval)
+PARAMETRIC_TRAJECTORY_IDS = {0, 2}          # direct_slm (404 J), direct_llm (475 J)
+
+# Single-Hop Retrieval (Lexical, Dense, and Guided)
+SINGLE_HOP_TRAJECTORY_IDS = {1, 3, 4}       # key_then_slm (761 J), vec_then_llm (1,104 J), reason_vec_llm (1,471 J)
+
+# Multi-Hop Recursive Decomposition (The Heavy Tier)
+DECOMPOSITION_TRAJECTORY_IDS = {5, 6}       # decompose_retrieve_reason (8,895 J), heavy_decompose (9,055 J)
 
 def _normalize_dataset_name(name: Optional[str]) -> str:
     if not name:
