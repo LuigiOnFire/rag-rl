@@ -180,10 +180,10 @@ class GreenEngine:
                 # Accordingly we use SLM for keyword and LLM for vector to maintain the intuition of "keyword retrieval is cheaper but less powerful, vector retrieval is more expensive but more powerful"
                 if action_id == actions.ACTION_RET_KEY:
                     argument, size_metrics = workers.generate_query_for_keyword_search(new_state, use_llm=False)
-                    raw_docs = self.retriever.search_bm25(argument)
+                    raw_docs = self.retriever.search_bm25(argument, k=5)
                 else:
                     argument, size_metrics = workers.generate_query_for_vector_search(new_state, use_llm=True)
-                    raw_docs = self.retriever.search_dense(argument)
+                    raw_docs = self.retriever.search_dense(argument, k=5)
 
                 # Update prev_searches in new_state
                 new_state['prev_searches'].append(argument)

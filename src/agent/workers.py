@@ -163,6 +163,7 @@ def generate_answer(state: GreenState, use_llm: bool = False) -> str:
 Extract the exact answer to the Sub-Question from the Context below.
 Output ONLY the specific entity, date, or fact requested. Be brief and concise. Do not write complete sentences.
 If the answer is not in the context, output exactly: "No relevant information found."
+If multiple candidates are present in the context, select the one that best matches the specific qualifiers in the question based on your general knowledge.
 
 ### CURRENT TASK
 {_brain_context(state, "Sub-query answer extraction")}

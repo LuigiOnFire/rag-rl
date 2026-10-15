@@ -1,122 +1,107 @@
-import torch
-import logging
-import copy
-import random
-from typing import Any, Dict, List, Union
-import glob
-import json
-import time
 import os
 import sys
+import glob
+import time
+import random
+import logging
+from typing import Any, Dict, List, Union
+
+import torch
 from datasets import Dataset
 from transformers import (
-    AutoTokenizer, 
-    AutoModelForCausalLM, 
-    BitsAndBytesConfig, 
-    TrainingArguments,
-    DataCollatorForLanguageModeling # We build on top of this standard class
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    DataCollatorForLanguageModeling
 )
-from peft import LoraConfig, prepare_model_for_kbit_training
-# Pylance/Linter friendly imports
+from peft import LoraConfig, get_peft_model
 from trl.trainer.sft_trainer import SFTTrainer
 from trl.trainer.sft_config import SFTConfig
 
 sys.path.append(os.getcwd())
 from src.train.dataset import load_and_clean_dataset
 from src.agent import actions
-from src.agent.prompts import format_state_for_prompt
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
-BASE_MODEL = os.getenv("SLM_MODEL", "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:latest")
-if BASE_MODEL == "qwen2.5:3b":
-    BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+RAW_MODEL = os.getenv("SLM_MODEL", "qwen2.5:3b")
+BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct" if RAW_MODEL in ("qwen2.5:3b", "qwen2.5") else RAW_MODEL
 RUN_LOGS_DIR = "data/trajectories"
 OUTPUT_DIR = "models/green-rag-sft-v1"
-# Prefer to overweight multi-hop, high-cost actions for stronger routing priors.
+
 COMPLEX_ACTION_IDS = {
     actions.ACTION_DEC_LLM,
     actions.ACTION_DEC_RSN,
     actions.ACTION_RSN_LLM,
-
 }
-COMPLEX_ACTION_MULTIPLIER = 4.0
+COMPLEX_ACTION_MULTIPLIER = 2.0  # Normalized down from 4.0 to prevent overfitting
 DATASET_SEED = 42
-# --- 1. CLEANING & LOADING LOGIC ---
-# src/train/dataset.py
 
-import json
-import glob
-import logging
-from datasets import Dataset
 
-# --- MANUAL COLLATOR IMPLEMENTATION (Bypasses Import Errors) ---
 class CompletionOnlyCollator(DataCollatorForLanguageModeling):
     """
-    Manually implements the masking logic. 
-    Everything BEFORE the 'response_template' is masked (Label = -100).
+    Robust completion-only collator that searches for either 'Action:' or ' Action:'
+    and masks prompt tokens with -100.
     """
-    def __init__(self, response_template: str, tokenizer: Any, mlm: bool = False):
-        super().__init__(tokenizer=tokenizer, mlm=mlm)
+    def __init__(self, tokenizer: Any, response_template: str = "Action:"):
+        super().__init__(tokenizer=tokenizer, mlm=False)
         self.response_template = response_template
-        # Encode the template to find its token IDs
-        self.response_token_ids = self.tokenizer.encode(
-            self.response_template, add_special_tokens=False
-        )
+        # Cache token IDs for variations with and without leading space
+        self.target_token_variants = [
+            self.tokenizer.encode(response_template, add_special_tokens=False),
+            self.tokenizer.encode(" " + response_template, add_special_tokens=False),
+            self.tokenizer.encode("\n" + response_template, add_special_tokens=False),
+        ]
 
     def torch_call(self, examples: List[Union[List[int], Any, Dict[str, Any]]]) -> Dict[str, Any]:
         batch = super().torch_call(examples)
         labels = batch["labels"].clone()
 
         for i in range(len(examples)):
-            # Find where the response starts
-            # We look for the sequence of tokens matching " Action:"
-            # This is a simple linear search for the token sequence
             found_idx = -1
-            for idx in range(len(labels[i]) - len(self.response_token_ids) + 1):
-                if torch.all(labels[i][idx : idx + len(self.response_token_ids)] == torch.tensor(self.response_token_ids)):
-                    found_idx = idx + len(self.response_token_ids)
-                    break
             
+            # Scan for any valid representation of the response prefix
+            for target_tokens in self.target_token_variants:
+                target_len = len(target_tokens)
+                target_t = torch.tensor(target_tokens, device=labels.device)
+                
+                for idx in range(len(labels[i]) - target_len + 1):
+                    if torch.all(labels[i][idx : idx + target_len] == target_t):
+                        found_idx = idx + target_len
+                        break
+                if found_idx != -1:
+                    break
+
             if found_idx != -1:
-                # Mask everything BEFORE the response starts
-                # -100 is the PyTorch "Ignore Index" for CrossEntropyLoss
                 labels[i][:found_idx] = -100
             else:
-                # If we didn't find the template (rare), mask everything just to be safe
-                # so we don't train on garbage.
+                logger.warning("Response template not found in sample. Masking entire sample.")
                 labels[i][:] = -100
-        
+
         batch["labels"] = labels
         return batch
-# -------------------------------------------------------------
+
 
 def main():
-    logger.info("Loading Tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right" 
+    logger.info("Loading Tokenizer for %s...", BASE_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
-    # 2. Find Data
-    # Look for all gold_trajectories.jsonl recursively
+    # 1. Discover Trajectory Files
     jsonl_files = glob.glob(f"{RUN_LOGS_DIR}/**/gold_trajectories.jsonl", recursive=True)
     if not jsonl_files:
-        print("No training data found in data/trajectories/**/gold_trajectories.jsonl")
+        logger.error("No training data found in %s/**/gold_trajectories.jsonl", RUN_LOGS_DIR)
         return
 
-    print(f"Found {len(jsonl_files)} trajectory files.")
-
+    logger.info("Found %d trajectory files.", len(jsonl_files))
     run_id = time.strftime("%Y%m%d_%H%M%S")
     run_dir = f"data/sft_runs/run_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
-    logging.debug(f"Run Directory: {run_dir}")
-    
 
-    # 3. Create Dataset
-    # Returns a Hugging Face 'datasets.Dataset'
+    # 2. Build Dataset
     oversample_config = {
         "complex_action_ids": COMPLEX_ACTION_IDS,
         "complex_multiplier": COMPLEX_ACTION_MULTIPLIER,
@@ -124,81 +109,71 @@ def main():
     rng = random.Random(DATASET_SEED)
     dataset = load_and_clean_dataset(jsonl_files, tokenizer, oversample_config, rng)
     if len(dataset) == 0:
-        print("Dataset is empty. Exiting.")
+        logger.error("Loaded dataset is empty. Halting.")
         return
-    
-    entries_to_log = min(100, len(dataset))
-    print(f"DEBUG: Writing {len(dataset)} samples to 'debug_dataset.json'...")
-    dataset.select(range(entries_to_log)).to_json(f"{run_dir}/dataset_preview.json", orient="records", lines=True)
-    
-    # --- MASKING SETUP ---
-    response_template = " Action:" 
-    
-    # Use our custom manual class
-    collator = CompletionOnlyCollator(
-        response_template=response_template, 
-        tokenizer=tokenizer
-    )
-    # ---------------------
 
-    logger.info("Loading Base Model...")
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+    logger.info("Loaded %d formatted training samples.", len(dataset))
+    dataset.select(range(min(50, len(dataset)))).to_json(
+        f"{run_dir}/dataset_preview.json", orient="records", lines=True
     )
-    
+
+    # 3. Model Loading (Native BF16 on L40S)
+    logger.info("Loading base model in native bfloat16...")
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        use_cache=False 
+        use_cache=False,
     )
-    model = prepare_model_for_kbit_training(model)
 
+    # 4. LoRA Setup (Targeting all linear matrices)
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "v_proj"] 
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    logger.info("Starting SFT...")
+    # 5. Training Arguments
     training_args = SFTConfig(
         output_dir=OUTPUT_DIR,
-        dataset_text_field="text",  
-        max_length=2048,    
+        dataset_text_field="text",
+        max_length=2048,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
         logging_steps=10,
-        num_train_epochs=12,        # 12 this is probably excessive but yolo
-        max_grad_norm=0.3,
-        warmup_ratio=0.1,
+        num_train_epochs=3,          # Calibrated 3-epoch pass
+        warmup_ratio=0.05,           # Reaches peak LR quickly
         lr_scheduler_type="cosine",
-        optim="paged_adamw_32bit",
-        save_strategy="epoch",
-        save_total_limit=5,
-        report_to="wandb",          # <-- Here is the magic W&B trigger!
-        # packing=False, # Optional: explicit False is safer for some versions
+        optim="adamw_torch",         # Standard PyTorch AdamW for native BF16
+        save_strategy="steps",
+        save_steps=50,               # Never lose progress on interruption
+        save_total_limit=3,
+        bf16=True,
+        report_to="none",
     )
-    
-    # 7. Trainer
+
+    collator = CompletionOnlyCollator(tokenizer=tokenizer, response_template="Action:")
+
     trainer = SFTTrainer(
         args=training_args,
         model=model,
         train_dataset=dataset,
         peft_config=peft_config,
-        data_collator=collator,    # <--- Use custom collator
+        data_collator=collator,
     )
 
+    logger.info("Starting SFT training pass...")
     trainer.train()
-    
-    logger.info("Saving...")
+
+    logger.info("Saving final adapter model to %s...", OUTPUT_DIR)
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
+    logger.info("SFT stage complete and saved successfully.")
+
 
 if __name__ == "__main__":
     main()

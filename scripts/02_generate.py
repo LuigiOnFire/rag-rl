@@ -39,24 +39,26 @@ def main():
     gold_path = f"{run_dir}/gold_trajectories.jsonl"
     
     # Initialize Streamer
-    active_datasets = ["hotpot", "musique", "twowiki"]
+#    active_datasets = ["hotpot", "musique", "twowiki"]
+    active_datasets = ["hotpot"]
+
     dataset_configs = {
         "hotpot": {
             "setting": "distractor", 
             "split": "train"
         },
-        "musique": {
-            "setting": "distractor", 
-            "split": "train"
-        },
-        "twowiki": {
-            "setting": "distractor", 
-            "split": "train"
-        }
+        # "musique": {
+        #     "setting": "distractor", 
+        #     "split": "train"
+        # },
+        # "twowiki": {
+        #     "setting": "distractor", 
+        #     "split": "train"
+        # }
     }
     
     # Passing limit=50 here gives an even mix; limit gives 50 samples per active dataset = 150 total.
-    streamer = MixedStreamer(dataset_names=active_datasets, limit=50, configs=dataset_configs)
+    streamer = MixedStreamer(dataset_names=active_datasets, limit=500, configs=dataset_configs)
     
     print(f"Streaming {streamer.n_limit} of {streamer.total_available:,} available examples "
           f"from: {', '.join(active_datasets)}")

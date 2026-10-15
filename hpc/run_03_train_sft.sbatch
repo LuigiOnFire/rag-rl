@@ -7,13 +7,19 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1              
 #SBATCH --time=12:00:00            
-#SBATCH --output=logs/03_train_sft_%j.out 
+#SBATCH --output=logs/%j_03_train_sft.out 
 
 # 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
 echo "Starting SFT Training on $HOSTNAME"
 export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+
+
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+# We set APPTAINERENV_ so these become JAVA_HOME and PATH inside the container
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
 
 # 2. The Container Wrap (Pure PyTorch, no Ollama background server!)
 apptainer exec --nv  \

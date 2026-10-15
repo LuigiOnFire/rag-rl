@@ -1,55 +1,67 @@
 #!/bin/bash
 #SBATCH --job-name=05_train_grpo
 #SBATCH --nodes=1
-#SBATCH --partition=l40s           # <-- Targeting the idle NVIDIA nodes
+#SBATCH --partition=l40s
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1              
 #SBATCH --time=48:00:00            
-#SBATCH --output=logs/05_train_grpo_%j.out 
+#SBATCH --output=logs/%j_05_train_grpo.out 
 
-# 1. Load the secure .env file (Goodbye hardcoded HF_TOKEN!)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# 1. Load the secure .env file
 export $(grep -v '^#' ~/.env | xargs)
 
-echo "Starting GRPO Training on $HOSTNAME"
-export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+UNIQUE_PORT=$(( 11000 + (SLURM_JOB_ID % 10000) ))
+echo "Starting GRPO Training on $HOSTNAME | Assigned Ollama Port: $UNIQUE_PORT"
 
-# 2. The Container Wrap (WITH Ollama background server!)
-apptainer exec --nv  \
-        --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
-        --env-file ~/.env \
-        pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
-        bash -c '
-            echo "Starting Ollama inside container..."
-            export OLLAMA_MODELS="./ollama_models"
-            
-            # We need to shrink the massive 8GB KV cache so the 32B model fits completely
-            # into the VRAM remaining after PyTorch takes its ~14GB slice.
-            export OLLAMA_FLASH_ATTENTION=true
-            export OLLAMA_KV_CACHE_TYPE=q8_0
-            
-            # Reserve exactly 18GB of overhead for PyTorch (18 * 1024^3)
-            # This leaves 26.4GB on the L40s (44.4GB - 18GB) which perfectly fits 
-            # Reserve exactly 14GB for PyTorch (14 * 1024^3)
-            export OLLAMA_GPU_OVERHEAD=15032385536
-            export OLLAMA_KEEP_ALIVE="5m"
-            export PYTORCH_ALLOC_CONF="expandable_segments:True"
-            
-            ./bin/ollama serve > logs/ollama_grpo.log 2>&1 &
-            OLLAMA_PID=$!
-            
-            # Wait for the server to wake up
-            sleep 15
-            
-            # Ensure environment/judge models are ready
-            ./bin/ollama pull $LLM_MODEL
-            
-            echo "Running Python GRPO Training..."
-            .venv/bin/python -u scripts/05_train_grpo.py
-            
-            echo "Cleaning up..."
-            kill $OLLAMA_PID
-        '
+export HF_HOME=/scratch.hpc/$USER/.cache/huggingface
+export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
+export APPTAINERENV_JAVA_HOME=$JAVA_HOME
+export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
+
+# Capture all CLI arguments passed to sbatch
+ARGS="$@"
+echo "Passing arguments to training script: $ARGS"
+
+# 2. Container Execution
+apptainer exec --nv \
+    --bind /scratch.hpc/$USER:/scratch.hpc/$USER \
+    --env-file ~/.env \
+    pytorch_2.4.0-cuda12.1-cudnn9-devel.sif \
+    bash -c '
+        echo "Starting Ollama inside container..."
+        export OLLAMA_MODELS="./ollama_models"
+        export OLLAMA_HOST="127.0.0.1:'"$UNIQUE_PORT"'"
+        export OLLAMA_FLASH_ATTENTION=true
+        export OLLAMA_KV_CACHE_TYPE=q8_0
+        export OLLAMA_GPU_OVERHEAD=12884901888
+        export OLLAMA_KEEP_ALIVE="5m"
+        export OLLAMA_MAX_LOADED_MODELS=2
+
+        # Fix: Correct PyTorch allocator variable inside container
+        export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+        ./bin/ollama serve > logs/ollama_grpo_'"$UNIQUE_PORT"'.log 2>&1 &
+        OLLAMA_PID=$!
+        
+        sleep 15
+        
+        export OLLAMA_HOST="127.0.0.1:'"$UNIQUE_PORT"'"
+        ./bin/ollama pull $LLM_MODEL
+        
+        # Root-cause fix: Strip all SLURM variables before Python/wandb ever launch
+        for var in $(compgen -v | grep "^SLURM_"); do
+            unset "$var"
+        done
+
+        echo "Running Python GRPO Training with args: $@"
+        .venv/bin/python -u scripts/05_train_grpo.py "$@"
+        
+        echo "Cleaning up Ollama..."
+        kill $OLLAMA_PID
+    ' -- $ARGS
 
 echo "GRPO Training complete."

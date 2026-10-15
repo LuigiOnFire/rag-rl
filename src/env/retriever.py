@@ -175,7 +175,7 @@ class GlobalRetriever:
         # you could slice `clean_text` here, but "Unknown Title" is safer.
         return "Unknown Title", clean_text
 
-    def search_bm25(self, query: str, k: int = 3) -> List[str]:
+    def search_bm25(self, query: str, k: int = 5) -> List[str]:
         hits = self.bm25_searcher.search(query, k=k)
         formatted_results = []
         
@@ -198,7 +198,7 @@ class GlobalRetriever:
                 
         return formatted_results
 
-    def search_dense(self, query: str, k: int = 3) -> List[str]:
+    def search_dense(self, query: str, k: int = 5) -> List[str]:
         # Safety guard for missing dense components
         if not self.use_dense or self.faiss_index is None or self.documents is None:
             return self.search_bm25(query, k)
