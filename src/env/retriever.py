@@ -8,6 +8,7 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any
 import sys
+from threading import RLock
 
 os.environ["OPENAI_API_KEY"] = "sk-not-needed"
 
@@ -24,19 +25,21 @@ class EphemeralRetriever:
     (Used for the 'distractor' setting with tiny, 10-paragraph contexts)
     """
     _model = None
+    _model_lock = RLock()
 
     @classmethod
     def get_model(cls):
-        if cls._model is None:
-            # Load on demand
-            cls._model = SentenceTransformer('BAAI/bge-base-en-v1.5')
-        return cls._model
+        with cls._model_lock:
+            if cls._model is None:
+                cls._model = SentenceTransformer('BAAI/bge-base-en-v1.5')
+            return cls._model
 
     def __init__(self, documents: List[str]):
         """
         Initialize with the specific corpus for this sample (Gold + Distractors).
         """
         self.documents = documents
+        self._search_lock = RLock()
         
         # 1. Build Sparse Index (BM25) - Safe to use rank_bm25 for tiny document lists
         tokenized_corpus = [doc.split() for doc in documents]
@@ -47,18 +50,17 @@ class EphemeralRetriever:
         self.doc_embeddings = model.encode(documents)
 
     def search_bm25(self, query: str, k: int = 3) -> List[str]:
-        tokenized_query = query.split()
-        return self.bm25.get_top_n(tokenized_query, self.documents, n=k)
+        with self._search_lock:
+            tokenized_query = query.split()
+            return self.bm25.get_top_n(tokenized_query, self.documents, n=k)
 
     def search_dense(self, query: str, k: int = 3) -> List[str]:
-        model = self.get_model()
-        query_vec = model.encode(query)
-        
-        scores = np.dot(self.doc_embeddings, query_vec)
-        # Top k indices
-        top_indices = np.argsort(scores)[-k:][::-1]
-        
-        return [self.documents[i] for i in top_indices]
+        with self._search_lock:
+            model = self.get_model()
+            query_vec = model.encode(query)
+            scores = np.dot(self.doc_embeddings, query_vec)
+            top_indices = np.argsort(scores)[-k:][::-1]
+            return [self.documents[i] for i in top_indices]
 
 class GlobalRetriever:
     """
@@ -68,6 +70,7 @@ class GlobalRetriever:
     and index topologies ('hnsw', 'ivf', 'flat').
     """
     _instances = {}
+    _instances_lock = RLock()
 
     @classmethod
     def get_instance(
@@ -79,15 +82,16 @@ class GlobalRetriever:
         nprobe: int = 64
     ):
         key = (corpus_type, use_dense, index_type)
-        if key not in cls._instances:
-            cls._instances[key] = cls(
-                corpus_type=corpus_type, 
-                use_dense=use_dense, 
-                index_type=index_type,
-                ef_search=ef_search,
-                nprobe=nprobe
-            )
-        return cls._instances[key]
+        with cls._instances_lock:
+            if key not in cls._instances:
+                cls._instances[key] = cls(
+                    corpus_type=corpus_type,
+                    use_dense=use_dense,
+                    index_type=index_type,
+                    ef_search=ef_search,
+                    nprobe=nprobe
+                )
+            return cls._instances[key]
 
     def __init__(
         self, 
@@ -99,6 +103,7 @@ class GlobalRetriever:
     ):
         self.corpus_type = corpus_type
         self.index_type = index_type
+        self._search_lock = RLock()
         
         # --- 1. PYSERINI SPARSE INITIALIZATION ---
         if corpus_type in ["dpr_wiki", "squad_wiki"]:
@@ -176,35 +181,31 @@ class GlobalRetriever:
         return "Unknown Title", clean_text
 
     def search_bm25(self, query: str, k: int = 5) -> List[str]:
-        hits = self.bm25_searcher.search(query, k=k)
-        formatted_results = []
-        
-        for hit in hits:
-            try:
-                doc = self.bm25_searcher.doc(hit.docid)
-                if not doc:
-                    continue
-                    
-                doc_dict = json.loads(doc.raw()) 
-                raw_text = doc_dict.get('contents', doc_dict.get('text', ''))
-                raw_title = doc_dict.get('title')
-                
-                # Route through the scraper
-                title, clean_text = self._extract_title(raw_text, raw_title)
-                formatted_results.append(f"{title}: {clean_text}")
-                    
-            except Exception as e:
-                logging.warning(f"Error parsing Lucene hit: {e}")
-                
-        return formatted_results
+        with self._search_lock:
+            hits = self.bm25_searcher.search(query, k=k)
+            formatted_results = []
+            for hit in hits:
+                try:
+                    doc = self.bm25_searcher.doc(hit.docid)
+                    if not doc:
+                        continue
+                    doc_dict = json.loads(doc.raw())
+                    raw_text = doc_dict.get('contents', doc_dict.get('text', ''))
+                    raw_title = doc_dict.get('title')
+                    title, clean_text = self._extract_title(raw_text, raw_title)
+                    formatted_results.append(f"{title}: {clean_text}")
+                except Exception as e:
+                    logging.warning(f"Error parsing Lucene hit: {e}")
+            return formatted_results
 
     def search_dense(self, query: str, k: int = 5) -> List[str]:
         # Safety guard for missing dense components
         if not self.use_dense or self.faiss_index is None or self.documents is None:
             return self.search_bm25(query, k)
             
-        query_vec = self.encoder_model.encode([query], normalize_embeddings=True, convert_to_numpy=True)
-        scores, indices = self.faiss_index.search(query_vec, k)
+        with self._search_lock:
+            query_vec = self.encoder_model.encode([query], normalize_embeddings=True, convert_to_numpy=True)
+            scores, indices = self.faiss_index.search(query_vec, k)
         
         results = []
         if indices is not None and len(indices) > 0:

@@ -42,13 +42,14 @@ class GreenState(TypedDict):
     # 4. History (Full History of Actions Taken for SFT)
     # Changed to Lightweight Items to prevent recursion bloat
     history: List[GreenHistoryItem]
+    dataset: str  # The dataset name, for reference and potential reuse in subqueries
     
     # 5. Metadata
     # Commented out for now
     # I don't forsee this being used
     # judge_log: Optional[str]
 
-def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
+def create_initial_state(question: str, ground_truth: str = "", dataset: str = "hotpot") -> GreenState:
     return {
         "question": question,
         "status": "SOLVING",
@@ -60,6 +61,7 @@ def create_initial_state(question: str, ground_truth: str = "") -> GreenState:
         "documents": [],
         "answer": None,
         "prev_searches": [],
+        "dataset": dataset
         # "judge_log": None
     }
 

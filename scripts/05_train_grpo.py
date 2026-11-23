@@ -16,6 +16,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 import wandb
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -32,6 +33,8 @@ from src.agent import actions
 from src.agent.prompts import format_state_for_prompt
 from src.oracle.judge import SoftJudge
 
+from concurrent.futures import ThreadPoolExecutor
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
@@ -44,7 +47,7 @@ if BASE_MODEL_ID in ("qwen2.5:3b", "qwen2.5"):
 NUM_GENERATIONS      = 4       # Rollouts per prompt (G)
 BATCH_SIZE           = 2       # Questions per gradient step
 MAX_STEPS_PER_TRAJ   = 15      
-CLIP_EPS             = 0.2     # Epsilon
+CLIP_EPS             = 0.1  # Tighter trust region for 9-action categorical head
 
 SAVE_EVERY           = 50
 EVAL_EVERY           = 50
@@ -337,6 +340,82 @@ def rollout_one_trajectory(
 
     return trajectory_steps, state, format_valid
 
+def rollout_batch_parallel(
+    model,
+    tokenizer,
+    engine: GreenEngine,
+    initial_states: List[GreenState],
+    forced_root_actions: List[Optional[int]],
+    device: torch.device,
+    temperature: float = 0.8,
+    max_workers: int = 8,
+):
+    model.set_adapter("active_rl")
+    model.eval()
+    tokenizer.padding_side = "left"
+
+    n = len(initial_states)
+    states = [copy.deepcopy(s) for s in initial_states]
+    trajs = [[] for _ in range(n)]
+    format_valids = [False] * n
+    active = [True] * n
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for step_i in range(MAX_STEPS_PER_TRAJ):
+            active_idxs = [i for i in range(n) if active[i]]
+            if not active_idxs:
+                break
+
+            prompts = [format_state_for_prompt(states[i]) + " Action: " for i in active_idxs]
+            masks = torch.stack([get_valid_action_mask(states[i], device) for i in active_idxs])
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+
+            # 1. Single batched forward pass on L40S for all active rollouts
+            with torch.no_grad():
+                logits = model(**inputs).logits[:, -1, :]  # Left-padded: final token is next-token position
+                action_tokens = get_action_token_tensor(tokenizer, device)
+                action_logits = logits[:, action_tokens].float()
+                action_logits = action_logits.masked_fill(~masks, -1e9)
+                log_probs = F.log_softmax(action_logits, dim=-1)
+
+                scaled = action_logits / max(temperature, 1e-4)
+                probs = torch.softmax(scaled, dim=-1)
+                sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+            # 2. Dispatch environment transitions (Ollama + retrieval) concurrently
+            futures = {}
+            for row, idx in enumerate(active_idxs):
+                forced = forced_root_actions[idx] if step_i == 0 else None
+                act_id = forced if forced is not None else int(sampled[row].item())
+                old_logp = log_probs[row, act_id].detach()
+
+                trajs[idx].append({
+                    "step_i": step_i,
+                    "prompt": prompts[row],
+                    "action_id": act_id,
+                    "target_token_id": int(action_tokens[act_id].item()),
+                    "old_logprob": old_logp,
+                    "valid_mask": masks[row].cpu(),
+                    "prev_joules": float(states[idx].get("total_joules", 0.0)),
+                })
+                futures[idx] = pool.submit(engine.step, states[idx], act_id)
+
+            for idx, fut in futures.items():
+                try:
+                    new_state = fut.result()
+                    format_valids[idx] = True
+                    states[idx] = new_state
+                    step_j = max(0.0, float(new_state.get("total_joules", 0.0)) - trajs[idx][-1]["prev_joules"])
+                    trajs[idx][-1]["step_joules"] = step_j
+                    if new_state.get("status") in ("SOLVED", "FAILED"):
+                        active[idx] = False
+                except Exception as exc:
+                    logger.warning("Engine step error on rollout %d: %s", idx, exc)
+                    trajs[idx][-1]["step_joules"] = 0.0
+                    active[idx] = False
+
+    return trajs, states, format_valids
+
 
 def grpo_loss(
     model,
@@ -371,18 +450,21 @@ def grpo_loss(
     total_loss = 0.0
     total_kl = 0.0
 
-    for traj, traj_advs, raw_r, is_corr in zip(trajectories, step_advantages, rewards, correct_flags):
+    for traj, step_advs, raw_r, is_corr in zip(
+        trajectories, step_advantages, rewards, correct_flags
+    ):
         if not traj:
             continue
+        traj_norm = float(len(traj))
 
         is_timeout = (raw_r <= -0.20)
         in_subquery_loop = False
 
-        for step_data, step_adv in zip(traj, traj_advs):
+        for step_data, adv_val in zip(traj, step_advs):
             step_i = step_data.get("step_i", 0)
             act_id = step_data["action_id"]
 
-            if abs(step_adv) < 1e-8:
+            if abs(adv_val) < 1e-8:
                 if act_id in _DECOMPOSE_IDS:
                     in_subquery_loop = True
                 continue
@@ -393,12 +475,12 @@ def grpo_loss(
 
             # 2. If trajectory PASSED but got negative step advantage due to energy cost,
             # penalize the routing decision that triggered decomposition, NOT internal subquery solver steps
-            if is_corr and step_adv < 0.0 and in_subquery_loop:
+            if not no_force_trajectory and is_corr and adv_val < 0.0 and in_subquery_loop:
                 continue
             if act_id in _DECOMPOSE_IDS:
                 in_subquery_loop = True
 
-            advantage = torch.tensor(step_adv, dtype=torch.float32, device=device)
+            advantage = torch.tensor(adv_val, dtype=torch.float32, device=device)
             prompt = step_data["prompt"]
             old_logp = step_data["old_logprob"].to(device)
             valid_mask = step_data["valid_mask"].to(device)
@@ -434,11 +516,6 @@ def grpo_loss(
             kl = (active_probs * (active_log_probs - ref_log_probs)).sum()
             kl_loss = effective_kl_coef * kl
 
-            if step_i == 0:
-                traj_norm = 1.0
-            else:
-                traj_norm = float(max(1, len(traj) - 1))
-
             step_loss = (pg_loss + kl_loss) * (1.0 / (traj_norm * num_valid * batch_scale))
             step_loss.backward()
 
@@ -449,12 +526,12 @@ def grpo_loss(
 
 def main():
     parser = argparse.ArgumentParser(description="GRPO Training for GreenRAG")
-    parser.add_argument("--learning_rate", type=float, default=2.0e-6)
-    parser.add_argument("--kl_coef", type=float, default=0.04)
+    parser.add_argument("--learning_rate", type=float, default=1.0e-6)
+    parser.add_argument("--kl_coef", type=float, default=0.0015)
     parser.add_argument("--danger_pay_base", type=float, default=0.10)
     parser.add_argument("--run_name", type=str, default="greenrag-grpo-baseline")
     parser.add_argument("--output_dir", type=str, default="models/green-rag-grpo-baseline")
-    parser.add_argument("--gradient_accum", type=int, default=4)
+    parser.add_argument("--gradient_accum", type=int, default=8)
     parser.add_argument("--joule_lambda", type=float, default=1.0e-5, help="Energy penalty coefficient")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint directory to resume from")
     parser.add_argument("--start_step", type=int, default=0, help="Step number to resume training from")
@@ -483,6 +560,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(SFT_MODEL_PATH)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     logger.info("Loading Base Model in native BF16: %s...", BASE_MODEL_ID)
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -509,9 +587,16 @@ def main():
 
     model.set_adapter("active_rl")
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
+    if args.start_step > 0:
+        warmup_scheduler = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    else:
+        warmup_scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=lambda update: min(1.0, (update + 1) / 40.0),
+        )
 
     retriever = GlobalRetriever.get_instance(corpus_type="fullwiki", index_type="hnsw")
-    engine = GreenEngine(retriever=retriever)
+    engine = GreenEngine(retriever=retriever, offline_energy=True)
 
     # 1. Initialize training data stream
     dataset_list = [d.strip() for d in args.datasets.split(",") if d.strip()]
@@ -561,37 +646,57 @@ def main():
         }
         total_actions = 0
 
+        lockstep_states = []
+        forced_actions = []
+        lockstep_samples = []
         for sample in batch_samples:
             question = sample["question"]
             ground_truth = sample["answer"]
-
+            dataset = sample.get("dataset", "hotpot")
             logger.info(f"\n--- Processing Q: {question[:80]}... ---")
+            lockstep_samples.append((question, ground_truth, dataset))
+            for g in range(NUM_GENERATIONS):
+                lockstep_states.append(create_initial_state(question, ground_truth, dataset=dataset))
+                forced_actions.append(
+                    actions.ACTION_DEC_LLM
+                    if g == 0 and not args.no_force_trajectory
+                    else None
+                )
 
-            trajectories = []
+        lockstep_trajs, lockstep_final_states, lockstep_format_valid = rollout_batch_parallel(
+            model,
+            tokenizer,
+            engine,
+            lockstep_states,
+            forced_actions,
+            device,
+            temperature=0.8,
+            max_workers=8,
+        )
+
+        for sample_idx, (question, ground_truth, dataset) in enumerate(lockstep_samples):
+            start = sample_idx * NUM_GENERATIONS
+            trajectories = lockstep_trajs[start:start + NUM_GENERATIONS]
             rewards = []
             correct_flags = []
 
-            for g in range(NUM_GENERATIONS):
-                init_state = create_initial_state(question)
-                
-                # Structural exploration override at root step, unless disabled by the CLI.
-                forced_first_action = None
-                if g == 0 and not args.no_force_trajectory:
-                    forced_first_action = actions.ACTION_DEC_LLM  # Force decomposition
-
-                traj, final_state, format_valid = rollout_one_trajectory(
-                    model, tokenizer, engine, init_state, device, 
-                    temperature=0.8, forced_root_action=forced_first_action
-                )
-                
+            for g, (traj, final_state, format_valid) in enumerate(zip(
+                trajectories,
+                lockstep_final_states[start:start + NUM_GENERATIONS],
+                lockstep_format_valid[start:start + NUM_GENERATIONS],
+            ), start=1):
                 r, is_correct = compute_reward(
-                    final_state, ground_truth, question, format_valid, 
-                    joule_lambda=args.joule_lambda
+                    final_state,
+                    ground_truth,
+                    question,
+                    format_valid,
+                    joule_lambda=args.joule_lambda,
                 )
-
+                rewards.append(r)
+                correct_flags.append(is_correct)
                 batch_correct.append(float(is_correct))
                 batch_joules.append(float(final_state.get("total_joules", 0.0)) if final_state else 0.0)
-                
+
                 for t_step in traj:
                     total_actions += 1
                     aid = t_step["action_id"]
@@ -600,16 +705,11 @@ def main():
                     elif aid in _DENSE_IDS: action_counts["dense"] += 1
                     elif aid in _DECOMPOSE_IDS: action_counts["decompose"] += 1
                     elif aid in _REASON_IDS: action_counts["reason"] += 1
-                
-                act_sequence = " -> ".join([str(t["action_id"]) for t in traj])
-                logger.info(f"  Gen {g+1}/{NUM_GENERATIONS} | Path: [{act_sequence}] | Reward: {r:.3f}")
 
-                trajectories.append(traj)
-                rewards.append(r)
-                correct_flags.append(is_correct)
+                act_sequence = " -> ".join(str(t["action_id"]) for t in traj)
+                logger.info(f"  Gen {g}/{NUM_GENERATIONS} | Path: [{act_sequence}] | Reward: {r:.3f}")
 
             batch_rewards.extend(rewards)
-
             sample_scaled_loss, sample_mean_kl = grpo_loss(
                 model, tokenizer, trajectories, rewards, correct_flags,
                 args.joule_lambda, device,
@@ -617,17 +717,16 @@ def main():
                 kl_coef=args.kl_coef,
                 no_force_trajectory=args.no_force_trajectory,
             )
-            
             batch_scaled_loss += sample_scaled_loss
             batch_mean_kl += sample_mean_kl
 
-            # Clear PyTorch cached VRAM after every question so Ollama has headroom
             torch.cuda.empty_cache()
 
         if (step + 1) % args.gradient_accum == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             optimizer.zero_grad()
+            warmup_scheduler.step()
             torch.cuda.empty_cache()
 
         avg_loss = batch_scaled_loss / BATCH_SIZE
@@ -666,7 +765,11 @@ def main():
 
             for eval_sample in fixed_eval_samples:
                 logger.info(f"  [Eval] Q: {eval_sample['question'][:80]}")
-                init_state = create_initial_state(eval_sample["question"])
+                init_state = create_initial_state(
+                    eval_sample["question"],
+                    eval_sample.get("answer", ""),
+                    dataset=eval_sample.get("dataset", "hotpot"),
+                )
                 
                 traj, final_state, format_valid = rollout_one_trajectory(
                     model, tokenizer, engine, init_state, device, temperature=0.0

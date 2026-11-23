@@ -16,6 +16,7 @@ from src.env.state import GreenState, GreenHistoryItem, get_active_subquery
 from src.agent import actions, workers
 from src.env.retriever import EphemeralRetriever, GlobalRetriever
 from typing import Union  # <--- Add this line!
+from src.env.cost_table import get_offline_step_joules
 
 # Get the cost table
 try:
@@ -39,28 +40,42 @@ def _hash_doc(doc: dict) -> str:
 
 # A class to encapsulate the engine logic and manage the state
 class GreenEngine:
-    def __init__(self, retriever: Union[EphemeralRetriever, GlobalRetriever]):
+    def __init__(self, retriever: Union[EphemeralRetriever, GlobalRetriever], offline_energy: bool = True):
         self.retriever = retriever
+        self.offline_energy = offline_energy
+        self.tracker = None
 
-        hidden_slurm_vars = {}
-        for key in list(os.environ.keys()):
-            if key.startswith("SLURM"):
-                hidden_slurm_vars[key] = os.environ.pop(key)
+        if not offline_energy:
+            hidden_slurm_vars = {}
+            for key in list(os.environ.keys()):
+                if key.startswith("SLURM"):
+                    hidden_slurm_vars[key] = os.environ.pop(key)
 
-        self.tracker = EmissionsTracker(
-            measure_power_secs=0.5,  # CRITICAL: Forces sampling every 0.5s for fast micro-actions
-            save_to_file=False,      # Prevents CodeCarbon from spamming your disk with CSVs
-            log_level="error"        # Suppresses background print statements
-        )
+            self.tracker = EmissionsTracker(
+                measure_power_secs=0.5,
+                save_to_file=False,
+                log_level="error"
+            )
 
-        self.tracker.start()
+            self.tracker.start()
     
     def get_cost(self, action_id: int) -> float:
         return COST_TABLE.get(str(action_id), 1.0)
 
+    def stop(self) -> None:
+        """Stop live hardware tracking if it was initialized."""
+        if self.tracker is not None:
+            self.tracker.stop()
+            self.tracker = None
+
     @contextmanager
     def track_energy(self, action_name: str):
         """Context manager to securely wrap tracking around an execution block."""
+        if self.offline_energy or self.tracker is None:
+            metrics = {"cost": 0.0}
+            yield metrics
+            return
+
         try:
             task_name = f"{action_name}_{uuid.uuid4().hex[:6]}"
             self.tracker.start_task(task_name)
@@ -277,7 +292,13 @@ class GreenEngine:
 
         # History and Cost Update
         step_cost = metrics['cost']
-        new_state['total_joules'] += step_cost
+        if self.offline_energy:
+            step_joules = get_offline_step_joules(state.get("dataset", "hotpot"), action_id)
+            new_state["total_joules"] = float(state.get("total_joules", 0.0)) + step_joules
+            step_cost = step_joules
+        
+        else: 
+            new_state['total_joules'] += step_cost
 
         new_state['history'].append(GreenHistoryItem(
             action_id=action_id,

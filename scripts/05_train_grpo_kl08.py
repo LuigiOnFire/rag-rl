@@ -355,7 +355,7 @@ def main():
 
     # 3. Environment & Dataset
     retriever = GlobalRetriever.get_instance(corpus_type="fullwiki", index_type="hnsw")
-    engine = GreenEngine(retriever=retriever)
+    engine = GreenEngine(retriever=retriever, offline_energy=True)
 
     streamer = MixedStreamer(
         dataset_names=["hotpot"],
@@ -393,7 +393,11 @@ def main():
 
             # Phase 1: Group Rollout (G independent trajectories)
             for g in range(NUM_GENERATIONS):
-                init_state = create_initial_state(question)
+                init_state = create_initial_state(
+                    question,
+                    ground_truth,
+                    dataset=sample.get("dataset", "hotpot"),
+                )
                 traj, final_state, format_valid = rollout_one_trajectory(
                     model, tokenizer, engine, init_state, device, temperature=0.8
                 )
@@ -480,7 +484,11 @@ def main():
             
             for eval_sample in eval_samples:
                 logger.info(f"  [Eval] Q: {eval_sample['question'][:80]}")
-                init_state = create_initial_state(eval_sample["question"])
+                init_state = create_initial_state(
+                    eval_sample["question"],
+                    eval_sample.get("answer", ""),
+                    dataset=eval_sample.get("dataset", "hotpot"),
+                )
                 
                 # Temperature 0.0 for greedy, deterministic evaluation
                 traj, final_state, format_valid = rollout_one_trajectory(

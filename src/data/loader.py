@@ -57,6 +57,14 @@ class MixedStreamer:
     def stream(self):
         """Yields samples from active iterators, deterministically if seed was set."""
         # Pass both shuffle and seed down to individual streamers
+        stream_names = []
+        for streamer in self.streamers:
+            matched = next(
+                (name for name, cls in DATASET_REGISTRY.items() if isinstance(streamer, cls)),
+                "hotpot",
+            )
+            stream_names.append(matched)
+        active_names = stream_names
         active_iters = [
             s.stream(shuffle=self.shuffle, seed=self.seed) 
             for s in self.streamers
@@ -71,8 +79,11 @@ class MixedStreamer:
             # Use self.rng to prevent polluting or being polluted by global random state
             current_iter = self.rng.choices(active_iters, weights=active_weights, k=1)[0]
             try:
-                yield next(current_iter)
+                item = next(current_iter)
+                item.setdefault("dataset", active_names[idx])
+                yield item
             except StopIteration:
                 idx = active_iters.index(current_iter)
                 active_iters.pop(idx)
                 active_weights.pop(idx)
+                active_names.pop(idx)

@@ -439,7 +439,11 @@ def evaluate_policy(
     for idx, sample in enumerate(eval_samples):
         question = sample["question"]
         ground_truth = sample["answer"]
-        init_state = create_initial_state(question)
+        init_state = create_initial_state(
+            question,
+            ground_truth,
+            dataset=sample.get("dataset", dataset),
+        )
 
         t_q0 = time.perf_counter()
         if fixed_policy_type is not None:
@@ -615,6 +619,12 @@ def main():
         default="hotpot",
         help="Single dataset alias (kept for backwards compatibility)",
     )
+    parser.add_argument(
+        "--offline-energy",
+        "--offline_energy",
+        action="store_true",
+        help="Use per-action offline Joule costs instead of live hardware measurements",
+    )
     args = parser.parse_args()
 
     target_datasets = args.datasets if args.datasets else [args.dataset]
@@ -670,7 +680,7 @@ def main():
         logger.info("Loaded %d validation samples for %s.", len(eval_samples), ds)
 
         retriever = GlobalRetriever.get_instance(corpus_type=corpus_type, index_type="hnsw")
-        engine = GreenEngine(retriever=retriever)
+        engine = GreenEngine(retriever=retriever, offline_energy=args.offline_energy)
 
         ref_2_1_records: Optional[List[Dict[str, Any]]] = None
 
