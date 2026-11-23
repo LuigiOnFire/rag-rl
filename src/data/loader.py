@@ -25,12 +25,16 @@ class MixedStreamer:
         weights: Optional[List[float]] = None,
         limit=None, 
         shuffle: bool = True,
+        seed: Optional[int] = None,
         configs: Optional[Dict[str, Dict[str, Any]]] = None
     ):
         self.configs = configs or {}
         self.streamers = []
         self.weights = weights
         self.shuffle = shuffle
+        self.seed = seed
+        self.rng = random.Random(seed) if seed is not None else random
+
         for name in dataset_names:
             ds_config = self.configs.get(name, {})
             
@@ -44,17 +48,19 @@ class MixedStreamer:
 
     @property
     def total_available(self) -> int:
-        """Sum of full (pre-limit) dataset sizes across all active streamers."""
         return sum(getattr(s, "total_size", len(s.dataset)) for s in self.streamers)
 
     @property
     def n_limit(self) -> int:
-        """Total number of samples that will actually be streamed (post-limit)."""
         return sum(len(s.dataset) for s in self.streamers)
 
     def stream(self):
-        """Randomly yields samples from the active iterators."""
-        active_iters = [s.stream(shuffle=self.shuffle) for s in self.streamers]
+        """Yields samples from active iterators, deterministically if seed was set."""
+        # Pass both shuffle and seed down to individual streamers
+        active_iters = [
+            s.stream(shuffle=self.shuffle, seed=self.seed) 
+            for s in self.streamers
+        ]
         
         if self.weights:
             active_weights = list(self.weights)
@@ -62,8 +68,8 @@ class MixedStreamer:
             active_weights = [1.0] * len(active_iters)
         
         while active_iters:
-            # We must use random.choices which returns a list of 1 element
-            current_iter = random.choices(active_iters, weights=active_weights, k=1)[0]
+            # Use self.rng to prevent polluting or being polluted by global random state
+            current_iter = self.rng.choices(active_iters, weights=active_weights, k=1)[0]
             try:
                 yield next(current_iter)
             except StopIteration:

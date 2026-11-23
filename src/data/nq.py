@@ -38,7 +38,7 @@ class NQStreamer(BaseStreamer):
             logger.error(f"Failed to load NQ Open: {e}")
             raise e
 
-    def stream(self, shuffle: bool = False) -> Generator[Dict[str, Any], None, None]:
+    def stream(self, shuffle: bool = False, seed: Optional[int] = None) -> Generator[Dict[str, Any], None, None]:
         """
         Yields cleaned samples one by one.
         
@@ -47,6 +47,11 @@ class NQStreamer(BaseStreamer):
         """
         if self.dataset is None:
              raise ValueError("Dataset not initialized.")
+        if shuffle:
+            dataset = self.dataset.shuffle(seed=seed)
+        else:
+            dataset = self.dataset
+            
         dataset = self.dataset.shuffle() if shuffle else self.dataset
         
         # Enumerate to inject an ID since nq_open lacks native IDs

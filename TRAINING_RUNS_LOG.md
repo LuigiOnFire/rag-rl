@@ -261,3 +261,335 @@ sbatch hpc/run_05_train_grpo.sbatch \
   --output_dir "models/greenrag-grpo-v7-2e6-lr"
 
 ```
+
+# Thrifty RAG: GRPO Training Journal & Experiment Log
+
+## 1. Architectural & Mathematical Debugging Log
+- **Advantage Starvation & The EV Trap**: Initial multi-step decomposition success rates (~15%) lagged far behind single-hop retrieval/generation (~40%), causing the optimizer to prematurely prune complex tools. Resolved via **Stratified Exploration / Trajectory Forcing** (Forcing Rollout 0 to execute `ACTION_DEC_LLM` at Step 0 while leaving rollouts 1–3 organic).
+- **Environment & Software Fixes**:
+  - Solved `scontrol` missing binary spam by scrubbing all `SLURM_*` environment variables right before launching Python/`wandb`.
+  - Resolved VRAM deadlocks and Ollama/PyTorch thrashing by adding frequent `torch.cuda.empty_cache()` calls per question iteration.
+- **GRPO Advantage & Loss Normalization**:
+  - Discovered that standard z-score normalization (`(R - mean) / std`) divides by microscopic $\sigma_R$ on all-pass batches (e.g., `0.999` vs `1.000`), creating an unintended `-1.50` penalty on successful decomposition rollouts. Transitioned to **Dr. GRPO mean-centered advantages (`R - \bar{R}`)**.
+  - Restored `kl_coef = 0.01` to anchor policies to the SFT reference prior and prevent softmax saturation.
+  - Added trajectory length normalization (`/ len(traj)`) to `step_loss` to prevent intermediate multi-hop retrieval steps from accumulating $3\times$–$10\times$ larger cumulative gradients than terminal generation steps.
+
+## 2. Prompt Engineering & Evaluation Improvements
+- **Step Horizon Tracker**: Injected `[Step X/15]` directly above the action trigger window and indexed history items (`[Step 1]`, `[Step 2]`) to break Markov state repetition during infinite retrieval loops.
+- **Deterministic Validation Set**: Pre-loaded a fixed set of validation samples (`fixed_eval_samples`) once at initialization to eliminate evaluation noise across checkpoints.
+
+---
+
+## 3. Experiment History & Configurations
+
+### Phase 6: Ablation & Scaling Runs (`v6`)
+- **Setup**: Launched three ablation runs across learning rates (`low-lr` at `1.0e-7`, `med-lr` at `5.0e-7`, and `high-lr` at `5.0e-6`).
+- **Observations**: 
+  - `high-lr` achieved a peak evaluation accuracy of **0.65**, proving multi-step decomposition works without Danger Pay, but eventually crashed into a dense retrieval loop (`[6 -> 3 -> 3 -> ... -> 3]`) due to logit saturation and unnormalized trajectory loss.
+  - All three learning rates followed identical KL divergence scaling curves proportional to their learning rates.
+
+### Phase 7: Production Runs (`v7`)
+- **Key Modifications**:
+  1. Explicit step horizon injected into prompts (`src/agent/prompts.py`).
+  2. Asymmetric timeout penalty (`-0.25` for non-termination vs `-0.10` for incorrect guesses) with step-0 root action protection.
+  3. Restored KL anchor (`--kl_coef 0.01`).
+  4. Trajectory-length loss normalization (`1.0 / (len(traj) * num_valid * batch_scale)`).
+  5. Dr. GRPO mean-centered advantages.
+---
+---
+- **Launch Commands**:
+```bash
+# High-LR Production Run
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 1.0e-7 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v7-5e-6-lr" \
+  --output_dir "models/greenrag-grpo-v7-5e-6-lr"
+
+# Mid-LR Production Run
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 2.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 1.0e-7 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v7-2e6-lr" \
+  --output_dir "models/greenrag-grpo-v7-2e-6-lr"
+
+* **Phase 7 Key Findings**:
+1. **Zero Collapse**: Both runs completed 1,000 steps with **0.0% evaluation timeouts**. The `-0.25` timeout penalty + step horizon prompt + `kl_coef=0.01` permanently solved the `v6` infinite-loop collapse.
+
+2. **Emergent Discovery of `[2 -> 1]` (`RET_KEY -> GEN_LLM`)**: Between Step 500 and Step 750, `v7-5e-6-lr` escaped the human-designed SFT prior (`[3 -> 1]`) and discovered `[2 -> 1]`—a hybrid combination not present in the 7 Oracle cascade routes (`02_generate_oracle.py` only had `[2 -> 0]` and `[3 -> 1]`). This boosted accuracy by **+4.5% (`44.0% -> 48.5%`)** while cutting energy by **-33.1% to -36.2% (`1,075 J -> 687–720 J`)**.
+
+
+
+### Phase 8: Subquery State-Machine Masking & Pareto Sweep (`v8`)
+
+* **Key Architectural Additions**:
+1. **Subquery State-Machine Grammar Mask**: Implemented `get_valid_action_mask(state, device)` to enforce valid subquery transitions (`Retrieve {2,3} -> [Optional Reason {4,5}] -> Answer Subquery {0,1}`), eliminating mid-trajectory subquery failures (`[6 -> 3 -> 1 -> 1 -> 1]`).
+2. **Root-Step Gradient Undilution**: Set `traj_norm = 1.0` at `step_i == 0` so root routing choices receive full gradient weight, preventing long trajectory chains from suppressing early decision updates.
+
+
+
+# SLOT 1: Direct v8 Control (Isolates Subquery Mask + Root Gradient Fix)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 1.0e-7 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v8-masked-5e6" \
+  --output_dir "models/greenrag-grpo-v8-masked-5e6"
+
+# SLOT 2: Pure Discriminative Accuracy (Zero All-Pass Penalty / Skips All-Pass Batches via std_r < 1e-6)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 0.0 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v8-acc-only" \
+  --output_dir "models/greenrag-grpo-v8-acc-only"
+
+# SLOT 3: High-Thrift Pareto Point (Calibrated Linear Joule Penalty + Light KL Tether)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.002 \
+  --joule_lambda 5.0e-5 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v8-high-thrift" \
+  --output_dir "models/greenrag-grpo-v8-high-thrift"
+
+  
+
+* **Phase 8 Key Findings & Behavioral Dynamics**:
+1. **`v8-acc-only` Unlocked True Multi-Hop Decomposition & Reasoning (75% Peak Eval Accuracy)**:
+* Because `joule_lambda = 0.0` sets `std_r == 0.0 < 1e-6` on all-pass batches, easy single-hop questions are completely skipped (`Loss = 0.0, KL = 0.0`). This eliminated the "All-Pass KL Pull" that previously dragged policies back toward their single-hop SFT prior on easy questions.
+
+
+* Consequently, `tools/decompose_pct` rose to **`0.10–0.14`**, with organic rollouts (`Gen 2–4`) actively selecting `DEC_SLM (6)` and `DEC_LLM (7)` and inserting `REASON_LLM (5)` before subquery/final generation (`[6 -> 3 -> 5 -> 1 -> 3 -> 5 -> 1 -> 1]` and `[3 -> 5 -> 1]`). Validation accuracy reached **`0.70` at Step 350**, **`0.75` at Step 400**, and **`0.70` at Step 500**.
+
+
+
+
+2. **`v8-masked-5e6` Confirmed the All-Pass KL Tether Effect**:
+* With `joule_lambda = 1.0e-7`, passing 2-step rollouts (`R = 1.000`) and passing 7-step Decompose rollouts (`R = 0.999`) have `std_r ≈ 1.4e-4 > 1e-6`. Thus, all-pass batches were not skipped, and the `0.01` KL penalty continuously anchored organic rollouts to `[2 -> 1]` (`RET_KEY -> GEN_LLM`).
+
+
+* The run was rock-solid across all 1,000 steps (`0.55` eval accuracy at Step 1000, zero timeouts, `decompose_pct` locked at `0.0714–0.0833` corresponding to 1 forced Decompose + 3 two-step single-hop rollouts).
+
+
+
+
+3. **`v8-high-thrift` Demonstrated the "Grammar Mask Lifeboat" Effect**:
+* Lowering `kl_coef` to `0.002` under a heavy `5.0e-5` Joule penalty caused `KL` to spike to `4.1–5.5` between Steps 200 and 300. Because `get_valid_action_mask` only constrained trajectories *after* `Decompose` was invoked, unmasked non-decompose rollouts (`Gen 2–4`) fell into 15-step retrieval loops (`reward_mean = -0.2125`, `eval/accuracy = 0.00` at Step 300).
+
+
+* Because forced `Decompose` (`Gen 1/4`) was protected by the Subquery Grammar Mask and always terminated cleanly (`-0.10` vs `-0.25` timeout), `Decompose` accumulated a massive positive advantage during the crash. At Step 305, the policy fled into `Decompose` (`decompose_pct` jumped from `0.018` to `0.138`), rescuing `eval/accuracy` from **`0.00` (Step 300) back to `0.50` (Step 450)** before gradually annealing back to ultra-cheap single-hop (`KL = 0.22`) by Step 1000.
+
+### Phase 9: Conditional KL Decoupling & Controlled $\lambda_J$ Sweep (`v9`)
+- **Diagnosis of Phase 8 Bimodal Split**:
+  - `v8-acc-only` (`joule_lambda = 0.0`) discovered emergent "Probe-Then-Decompose" routing (`[2 -> 6 -> ...]`) and reached **54.0% accuracy (+10.0% over SFT)**, but decomposed on 93.5%–100% of queries (`5,198–9,315 J`) due to zero energy penalty when single-hop and multi-hop both succeeded.
+  - Conversely, `v8-masked-5e6` (`joule_lambda = 1e-7`) converged to 100% single-hop `[2 -> 1]` (`48.5%` @ `667.4 J`) because nonzero energy variance (`std_r > 1e-6`) kept all-pass batches active, causing the `kl_coef = 0.01` tether to pull the policy back toward the single-hop SFT prior on every easy question.
+- **Key Modifications**:
+  1. **Conditional KL Decoupling on All-Pass Batches (`05_train_grpo.py`)**: Set `effective_kl_coef = 0.0 if all_passed else kl_coef` inside `grpo_loss()`. When all rollouts succeed (`min(R) > 0`), the SFT KL pull is disabled while the Policy Gradient (`pg_loss`) remains active, allowing $\lambda_J$ to reward `[2 -> 1]` over `[2 -> 6 -> ...]` on easy queries without erasing multi-hop weights.
+  2. **Upgraded Evaluation Telemetry (`06_eval_checkpoints.py`)**: Added subquery grammar masking (`get_valid_action_mask`), standard SQuAD/HotpotQA Exact Match (`EM`) and token-level `F1`, effective system power (`Watts = Joules / Seconds`), per-query JSON records, and multi-dataset (`--dataset`) support.
+
+## Gemini's suggested values. Low: 5e-6, Med: 1.5e-5, High 3.5e-5
+## My plan: Low: 1e-7, Med: 7e-7, High: 5e-6
+## Med is roughly (very roughly the geometric mean (7.07))
+
+- **Launch Commands (3-Slot Controlled $\lambda_J$ Sweep)**:
+```bash
+# SLOT 1: Light Energy Penalty (1.0e-7)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 1.0e-7 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v9-cond-1e7" \
+  --output_dir "models/greenrag-grpo-v9-cond-1e7"
+
+# SLOT 2: Mid Energy Penalty (7e-7)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 7.0e-7 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v9-cond-7e7" \
+  --output_dir "models/greenrag-grpo-v9-cond-7e7"
+
+# SLOT 3: High Energy Penalty (5e-6)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 5.0e-6 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v9-cond-5e6" \
+  --output_dir "models/greenrag-grpo-v9-cond-5e6"
+
+  # SLOT A: 2.0e-5 (4x stronger than 5e6 — 5,000 J costs -0.10 reward)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 2.0e-5 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v9-cond-2e5" \
+  --output_dir "models/greenrag-grpo-v9-cond-2e5"
+
+# SLOT B: 5.0e-5 (10x stronger than 5e6 — 5,000 J costs -0.25 reward)
+sbatch hpc/run_05_train_grpo.sbatch \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --joule_lambda 5.0e-5 \
+  --gradient_accum 8 \
+  --run_name "greenrag-grpo-v9-cond-5e5" \
+  --output_dir "models/greenrag-grpo-v9-cond-5e5"
+
+  # ------------------------------------------------------------------------------
+# RUN 1: Resume v9-cond-7e7 from step_650 to step_1000
+# ------------------------------------------------------------------------------
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v9-cond-7e7-resumed \
+  --output_dir models/greenrag-grpo-v9-cond-7e7 \
+  --joule_lambda 7.0e-7 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --resume_from models/greenrag-grpo-v9-cond-7e7/step_650 \
+  --start_step 650 \
+  --total_steps 1500
+
+
+# ------------------------------------------------------------------------------
+# RUN 2: New intermediate lambda sweep (v9-cond-5e6)
+# ------------------------------------------------------------------------------
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v9-cond-5e6 \
+  --output_dir models/greenrag-grpo-v9-cond-5e6 \
+  --joule_lambda 5.0e-6 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01
+
+
+# ------------------------------------------------------------------------------
+# RUN 3: New intermediate lambda sweep (v9-cond-2e6)
+# ------------------------------------------------------------------------------
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v9-cond-2e6 \
+  --output_dir models/greenrag-grpo-v9-cond-2e6 \
+  --joule_lambda 2.0e-6 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --total_steps 1000 \
+  --datasets hotpot
+
+
+# New plan: Continue training after the 1000 checkpoint hotpot training without trajectory forcing
+# 
+# 1. Highest Thrift (5.0e-5) — resumes from v9-cond-5e5/step_1000
+# DONE to 1000 extra steps
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v10-mixed-5e5 \
+  --resume_from models/greenrag-grpo-v9-cond-5e5/step_1000 \
+  --output_dir models/greenrag-grpo-v10-mixed-5e5 \
+  --start_step 1000 \
+  --total_steps 2000 \
+  --joule_lambda 5.0e-5 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+# 2. Mid-High Thrift (2.0e-5) — resumes from v9-cond-2e5/step_1000
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v10-mixed-2e5 \
+  --resume_from models/greenrag-grpo-v9-cond-2e5/step_1000 \
+  --output_dir models/greenrag-grpo-v10-mixed-2e5 \
+  --start_step 1000 \
+  --total_steps 2000 \
+  --joule_lambda 2.0e-5 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+# 3. Balanced Thrift (5.0e-6) — resumes from v9-cond-5e6/step_1000
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v10-mixed-5e6 \
+  --resume_from models/greenrag-grpo-v9-cond-5e6/step_1000 \
+  --output_dir models/greenrag-grpo-v10-mixed-5e6 \
+  --start_step 1000 \
+  --total_steps 2000 \
+  --joule_lambda 5.0e-6 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+# 4. Mid-Low Penalty (2.0e-6) — change --resume_from to v9-cond-2e6/step_1000 once Stage 1 completes
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v10-mixed-2e6 \
+  --resume_from models/greenrag-grpo-v9-cond-5e6/step_1000 \
+  --output_dir models/greenrag-grpo-v10-mixed-2e6 \
+  --start_step 1000 \
+  --total_steps 2000 \
+  --joule_lambda 2.0e-6 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+# 5. Low Penalty (7.0e-7) — resumes from v9-cond-7e7/step_1000
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v10-mixed-7e7 \
+  --resume_from models/greenrag-grpo-v9-cond-7e7/step_1000 \
+  --output_dir models/greenrag-grpo-v10-mixed-7e7 \
+  --start_step 1000 \
+  --total_steps 2000 \
+  --joule_lambda 7.0e-7 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+  ## Phase 11 (v11): Bellman Causal Return-to-Go ($G_{i,t}$) & Depth-Aligned Baselines
+
+### Motivation & Code Changes (`05_train_grpo.py`)
+In **v9/v10**, `grpo_loss` broadcast a single full-trajectory return $G_{i,0}$ to every step $t$ in rollout $i$[cite: 1]. On multi-hop questions where 2 of 4 rollouts failed, successful trajectories with redundant keyword loops (`[2 -> 2 -> 2 -> 2 -> 1]`) rode their own accuracy coattails ($A_i = G_{i,0} - \bar{G}_0 > 0$), positively reinforcing redundant searches at $t \ge 2$ while adding sunk-cost variance ($J_{<t}$) to late-step updates[cite: 1].
+
+To fix multi-step credit assignment without adding heuristic shaping penalties or step caps, **v11** updates `05_train_grpo.py` with three principled RL changes:
+1. **Per-step Joule accounting (`step_joules`):** Records marginal hardware energy `max(0.0, curr_joules - prev_joules)` around every `engine.step(state, action_id)` call inside `rollout_one_trajectory`.
+2. **Bellman causal return-to-go ($G_{i,t}$):** Replaces uniform trajectory return $G_{i,0}$ with step-specific causal returns $G_{i,t} = 1.0 - \lambda_J \sum_{k=t}^{T_i - 1} J_{i,k}$ for solved rollouts (keeping flat terminal penalties `-0.10` / `-0.25` on failures/timeouts to preserve the root anti-cowardice guarantee), stripping out sunk energy $J_{<t}$ spent before step $t$.
+3. **Depth-aligned Dr. GRPO baselines ($A_{i,t} = G_{i,t} - \bar{G}_t$):** Computes step-level baselines at every depth $t$ across rollouts still active at step $t$ plus peers already absorbed into a solved terminal state ($G^{\text{abs}} = 1.0$), directly pitting early stopping (`GEN_SLM`) against additional retrieval (`RET_KEY`/`RET_VEC`) on remaining Joules.
+
+### Hyperparameter Rationale
+* **`--joule_lambda 2.0e-5`:** Calibrated Pareto knee from `v9-cond-2e5`[cite: 1]—each extra `~342 J` `RET_KEY` step costs `0.0068` return-to-go at depth $t$, giving early exit a clean positive advantage over redundant `>=4x` loops while keeping `5,000 J` decomposition (`R = 0.90`) viable on genuine multi-hop queries[cite: 1].
+* **Learning Rate Sweep (`2.0e-6` vs. `5.0e-6`):**
+  * **Run 1 (`2.0e-6`):** Lower step size allows smaller per-step marginal Joule differences ($\Delta G_t \approx 0.007\text{–}0.022$) to accumulate smoothly over `gradient_accum 8` without early batch variance locking in greedy `RET_KEY -> RET_KEY` transitions.
+  * **Run 2 (`5.0e-6`):** Direct `v9` LR control[cite: 1] isolating the effect of causal $G_{i,t}$ against uniform $G_{i,0}$ under identical optimizer dynamics.
+
+### Launch Commands
+
+```bash
+# 1. Causal Return-to-Go (2.0e-5) — Stabilized LR (2.0e-6) from SFT
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v11-causal-2e5-lr2e6 \
+  --output_dir models/greenrag-grpo-v11-causal-2e5-lr2e6 \
+  --start_step 0 \
+  --total_steps 1000 \
+  --joule_lambda 2.0e-6 \
+  --learning_rate 2.0e-6 \
+  --kl_coef 0.01 \
+  --gradient_accum 8 \
+  --datasets hotpot
+
+# 2. Causal Return-to-Go (2.0e-5) — v9 Control LR (5.0e-6) from SFT
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v11-causal-2e5-lr5e6 \
+  --output_dir models/greenrag-grpo-v11-causal-2e5-lr5e6 \
+  --start_step 0 \
+  --total_steps 1000 \
+  --joule_lambda 2.0e-6 \
+  --learning_rate 5.0e-6 \
+  --kl_coef 0.01 \
+  --gradient_accum 8 \
+  --datasets hotpot

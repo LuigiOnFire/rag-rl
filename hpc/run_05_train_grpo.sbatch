@@ -22,7 +22,23 @@ export JAVA_HOME=/scratch.hpc/$USER/.local/java/jdk-21.0.4+7
 export APPTAINERENV_JAVA_HOME=$JAVA_HOME
 export APPTAINERENV_PATH=$JAVA_HOME/bin:$PATH
 
-# Capture all CLI arguments passed to sbatch
+
+export PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+mkdir -p $PYSERINI_CACHE
+export APPTAINERENV_PYSERINI_CACHE=/scratch.hpc/$USER/.cache/pyserini
+
+
+# If no arguments are passed to sbatch, default to launching the v10 mixed-dataset run
+if [ $# -eq 0 ]; then
+    set -- \
+        --run_name greenrag-grpo-v10-mixed-5e5 \
+        --output_dir models/greenrag-grpo-v10-mixed-5e5 \
+        --joule_lambda 5.0e-5 \
+        --learning_rate 2.0e-6 \
+        --kl_coef 0.04 \
+        --datasets hotpot,squad
+fi
+
 ARGS="$@"
 echo "Passing arguments to training script: $ARGS"
 
