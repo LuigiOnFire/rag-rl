@@ -569,6 +569,7 @@ To fix multi-step credit assignment without adding heuristic shaping penalties o
 
 ### Launch Commands
 
+## MISLEADING, this was run as 2e5 in the name but with 2e6 as the value
 ```bash
 # 1. Causal Return-to-Go (2.0e-5) — Stabilized LR (2.0e-6) from SFT
 sbatch hpc/run_05_train_grpo.sbatch \
@@ -593,3 +594,44 @@ sbatch hpc/run_05_train_grpo.sbatch \
   --kl_coef 0.01 \
   --gradient_accum 8 \
   --datasets hotpot
+
+  ## Phase 12 (v12): Optimizer/Trust-Region Recalibration, Standalone Pareto Eval & Mixed-Dataset Transfer
+
+### Motivation & Experimental Design
+In **Phase 11 (v11)**, Bellman causal return-to-go ($G_{i,t} = 1.0 - \lambda_J \sum_{k=t}^{T_i - 1} J_{i,k}$) and depth-aligned Dr. GRPO baselines ($A_{i,t} = G_{i,t} - \bar{G}_t$) eliminated mid-training pruning collapses on HotpotQA, sustaining 59.3% mean `eval/accuracy` on `v11-lr5e6` (holding 60.0%–65.0% from `step_100` through `step_650`) and 58.0% mean `eval/accuracy` on `v11-lr2e6` (peaking at 65.0% at `step_300`, `step_350`, and `step_700`)[cite: 1].
+
+**Phase 12 (v12)** builds on those checkpoints in two stages:
+1. **Stage 12A — Standalone $N=200$ Pareto Selection (`06_eval_checkpoints.py`):** Evaluates top `v11` checkpoints on the deterministic $N=200$ (`seed=42`) HotpotQA validation split to measure exact mean/median Joules, step counts, and action distributions against the `v9-cond-2e5` Pareto knee (`50.5%` accuracy @ `1,939.5 J`, `5.37` avg steps)[cite: 1].
+2. **Stage 12B — Recalibrated Policy Optimization & Phase 2 Mixed-Dataset Transfer (`hotpot,squad,nq`, `--no-force-trajectory`):** Resumes from the top `v11` checkpoint(s) with tightened trust-region/optimizer controls and organic 4-rollout sampling (`forced_first_action = None`) across an equal mixture of multi-hop (`hotpot`) and single-hop (`squad`, `nq`) queries so the router learns single-hop escalation suppression without forgetting multi-hop decomposition[cite: 1].
+
+### Code & Hyperparameter Recalibrations (`05_train_grpo.py`)
+* **Learning Rate & Linear Warmup (`LambdaLR`):** Dropped peak `--learning_rate` from `5.0e-6` / `2.0e-6` to `1.0e-6` with a **40-step linear warmup** (`LambdaLR`) to prevent early optimizer shock when transitioning to organic mixed-dataset rollouts.
+* **KL Coefficient & Tighter PPO Clipping:** Lowered `--kl_coef` from `0.01` to `0.0015` (with `0.001` as a secondary sweep point) so KL prevents vocabulary/logit drift without outbidding the energy reward signal, while tightening `CLIP_EPS` from `0.2` to `0.1` to bound single-step policy ratio updates.
+* **Effective Batch Size (`--gradient_accum 8`):** Set `--gradient_accum 8` (up from the `4` default—`16` questions / `64` trajectories per optimizer step at `BATCH_SIZE = 2`, `NUM_GENERATIONS = 4`) to cut batch-level multi-hop variance in half[cite: 1].
+* **Tighter Gradient Norm Clipping:** Applied `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)` immediately before `optimizer.step()` (tightened from `1.0`) to damp occasional high-variance multi-hop gradient spikes[cite: 1].
+* **Phase 2 Workload & Rollout Mode:** Enabled `--datasets hotpot,squad,nq` (equal `1/3` sampling weights) and `--no-force-trajectory` (symmetric 4-rollout Dr. GRPO advantage normalization in `grpo_loss`)[cite: 1].
+
+# Primary v12 Run: lr=1.0e-6 (40-step warmup), kl_coef=0.0015, clip_eps=0.1, grad_accum=8, max_norm=0.5
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v12-mixed-2e5-lr1e6-kl15e4 \
+  --output_dir models/greenrag-grpo-v12-mixed-2e5-lr1e6-kl15e4 \
+  --total_steps 1000 \
+  --joule_lambda 2.0e-5 \
+  --learning_rate 1.0e-6 \
+  --kl_coef 0.0015 \
+  --gradient_accum 8 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
+
+# Secondary KL Sensitivity Check: kl_coef=0.001
+sbatch hpc/run_05_train_grpo.sbatch \
+  --run_name greenrag-grpo-v12-mixed-2e5-lr1e6-kl1e3 \
+  --output_dir models/greenrag-grpo-v12-mixed-2e5-lr1e6-kl1e3 \
+  --start_step 650 \
+  --total_steps 1000 \
+  --joule_lambda 2.0e-5 \
+  --learning_rate 1.0e-6 \
+  --kl_coef 0.001 \
+  --gradient_accum 8 \
+  --datasets hotpot,squad,nq \
+  --no-force-trajectory
