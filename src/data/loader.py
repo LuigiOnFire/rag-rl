@@ -30,12 +30,14 @@ class MixedStreamer:
     ):
         self.configs = configs or {}
         self.streamers = []
+        self.dataset_names = []
         self.weights = weights
         self.shuffle = shuffle
         self.seed = seed
         self.rng = random.Random(seed) if seed is not None else random
 
-        for name in dataset_names:
+        active_weights = []
+        for position, name in enumerate(dataset_names):
             ds_config = self.configs.get(name, {})
             
             if name not in DATASET_REGISTRY:
@@ -45,6 +47,11 @@ class MixedStreamer:
             streamer_class = DATASET_REGISTRY[name]
             streamer_instance = streamer_class(limit=limit, **ds_config)
             self.streamers.append(streamer_instance)
+            self.dataset_names.append(name)
+            if weights:
+                active_weights.append(weights[position] if position < len(weights) else 1.0)
+        if weights:
+            self.weights = active_weights
 
     @property
     def total_available(self) -> int:
@@ -57,14 +64,7 @@ class MixedStreamer:
     def stream(self):
         """Yields samples from active iterators, deterministically if seed was set."""
         # Pass both shuffle and seed down to individual streamers
-        stream_names = []
-        for streamer in self.streamers:
-            matched = next(
-                (name for name, cls in DATASET_REGISTRY.items() if isinstance(streamer, cls)),
-                "hotpot",
-            )
-            stream_names.append(matched)
-        active_names = stream_names
+        active_names = list(self.dataset_names)
         active_iters = [
             s.stream(shuffle=self.shuffle, seed=self.seed) 
             for s in self.streamers
@@ -78,6 +78,7 @@ class MixedStreamer:
         while active_iters:
             # Use self.rng to prevent polluting or being polluted by global random state
             current_iter = self.rng.choices(active_iters, weights=active_weights, k=1)[0]
+            idx = active_iters.index(current_iter)
             try:
                 item = next(current_iter)
                 item.setdefault("dataset", active_names[idx])
